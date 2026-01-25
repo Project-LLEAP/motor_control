@@ -2,10 +2,7 @@
 input as follows: inital postion, inital velocity, final postion, final velocity, duration
 */
 
-//#include <Wire.h>
-//#include <Adafruit_ADS1X15.h>
-// 
-//Adafruit_ADS1115 ads1115;	// Construct an ads1115 
+#include <SPI.h>
 
 // Motor control defines
 #define DAC1 25 //Speed Controller Pin 1
@@ -21,6 +18,12 @@ input as follows: inital postion, inital velocity, final postion, final velocity
 #define maxVolt 3.3 // Maximum Voltage from ESP32 
 #define minVolt 0.1 // Minimum Voltage accepted by Motor Driver
 
+// encoder defines
+#define CS_PIN 5           // Chip select connected to digital pin 2
+#define AMT22_NOP 0x00     // No-operation byte per datasheet
+#define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
+#define AMT22_ZERO 0x70
+
 float coeff[4]; //Create Global Coefficienct Matrix
 int sign = 1; // Create Global sign variable and initialize to 1
 
@@ -32,31 +35,33 @@ void setup() {
   setup_encoder();
   setup_motor_controller();
 
+  setZeroSPI(CS_PIN);
+
   /**
   input as follows: inital postion, inital velocity, final postion, final velocity, duration
   */
-  float points[][5] = {{0,0,45,0,5}}; //, // gives -0.72x^{3}+5.4x^{2}
-                       // {45,0,0,0,5}};
-  int pointNumber = sizeof(points)/sizeof(points[0]);
+  // float points[][5] = {{0,0,45,0,5}}; //, // gives -0.72x^{3}+5.4x^{2}
+  //                      // {45,0,0,0,5}};
+  // int pointNumber = sizeof(points)/sizeof(points[0]);
 
-  motionProfile(points, pointNumber);
+  // motionProfile(points, pointNumber);
 }
 
-void loop() {
-  uint16_t position_14bit = readEncoderPosition14Bit();
-  float position_float = encoderReadingToDeg(position_14bit);
+void printEncoderPosition(uint16_t position_14bit, float position_float) {
   Serial.print("Position (14 bit): ");
   Serial.print(position_14bit, DEC);            // Print absolute position value
   Serial.print(" = ");
   Serial.print(position_float, DEC);
   Serial.println(" deg");
-  // delay(100);                          // Update rate
+}
 
-  if (!Serial.read()) {
-    delay(30);
-  }
+void loop() {
+  delay(500);
+  uint16_t position_14bit = readEncoderPosition14Bit();
+  float position_float = encoderReadingToDeg(position_14bit);
+  printEncoderPosition(position_14bit, position_float);
 
-    // main code to run repeatedly:
+  // main code to run repeatedly:
   if (Serial.available() > 0) { //Check if Serial Messages Were Recieved
     String input = Serial.readString();
     int index = input.indexOf(' ');
@@ -94,31 +99,17 @@ void loop() {
        }
      }
     }
-  //Convert All Strings to Floats
-  float x1 = x1_s.toFloat();
-  float v1 = v1_s.toFloat();
-  float x2 = x2_s.toFloat();
-  float v2 = v2_s.toFloat();
-  float duration = duration_s.toFloat();
-  float points[][5] = {x1,v1,x2,v2,duration};
+    //Convert All Strings to Floats
+    float x1 = x1_s.toFloat();
+    float v1 = v1_s.toFloat();
+    float x2 = x2_s.toFloat();
+    float v2 = v2_s.toFloat();
+    float duration = duration_s.toFloat();
+    float points[][5] = {x1,v1,x2,v2,duration};
 
-  float points[][5] = {{0,0,45,0,5}}; // debug
-  motionProfile(points, 1);
-  delay(1000);
-
-}
-
-void setup_encoder() {
-  pinMode(CS_PIN, OUTPUT);     // Set chip select pin
-  SPI.begin();                 // Initialize SPI bus
-  digitalWrite(CS_PIN, HIGH);  // Default CS high (inactive)
-}
-
-void setup_motor_controller() {
-  pinMode(DAC1, OUTPUT); //Push a DAC Output to Motor Speed Controller
-  pinMode(enable1, OUTPUT); //Push an Enable Signal Output to Motor Controller
-  pinMode(direction1, OUTPUT); //Push a Direction Signal Output to Motor Controller
-  digitalWrite(enable1, LOW);
+    motionProfile(points, 1);
+    delay(1000);
+  }
 }
 
 // Input an array of points to hit and the number of points in the array
@@ -196,6 +187,14 @@ void motionProfile(float points[][5], int pointNumber) {
       Serial.print(voltsOut);
       Serial.println();
       tOld = t;
+      
+      // encoder reading during trajectory
+      uint16_t position_14bit = readEncoderPosition14Bit();
+      float position_float = encoderReadingToDeg(position_14bit);
+      printEncoderPosition(position_14bit, position_float);
+      float pos_error = position_float - positionOut;
+      Serial.print("Position error (encoder reading - positionOut) = ");
+      Serial.println(pos_error);
     }
     dacWrite(DAC1, 0);
   }
@@ -259,6 +258,19 @@ void matrixSolver(float x1, float v1, float t1, float x2, float v2, float t2) {
   coeff[3] = c4;
 }
 
+void setup_encoder() {
+  pinMode(CS_PIN, OUTPUT);     // Set chip select pin
+  SPI.begin();                 // Initialize SPI bus
+  digitalWrite(CS_PIN, HIGH);  // Default CS high (inactive)
+}
+
+void setup_motor_controller() {
+  pinMode(DAC1, OUTPUT); //Push a DAC Output to Motor Speed Controller
+  pinMode(enable1, OUTPUT); //Push an Enable Signal Output to Motor Controller
+  pinMode(direction1, OUTPUT); //Push a Direction Signal Output to Motor Controller
+  digitalWrite(enable1, LOW);
+}
+
 uint16_t readEncoderPosition14Bit(void) {
   uint16_t position = 0;
 
@@ -283,5 +295,30 @@ float encoderReadingToDeg(uint16_t position) {
 
 float readEncoderPositionDeg(void) {
   return encoderReadingToDeg(readEncoderPosition14Bit());
+}
+
+/*
+ * The AMT22 bus allows for extended commands. The first byte is 0x00 like a normal position transfer, but the
+ * second byte is the command.
+ * This function takes the pin number of the desired device as an input
+ */
+void setZeroSPI(uint8_t cs_pin)
+{
+  //set CS to low
+  digitalWrite(cs_pin, LOW);
+  delayMicroseconds(3);
+
+  //send the first byte of the command
+  SPI.transfer(AMT22_NOP);
+  delayMicroseconds(3);
+
+  //send the second byte of the command
+  SPI.transfer(AMT22_ZERO);
+  delayMicroseconds(3);
+  
+  //set CS to high
+  digitalWrite(cs_pin, HIGH);
+
+  delay(250); //250 millisecond delay to allow the encoder to reset
 }
 
