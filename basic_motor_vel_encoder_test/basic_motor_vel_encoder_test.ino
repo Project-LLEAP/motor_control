@@ -56,138 +56,74 @@ void loop() {
     String input = Serial.readString();
     int index = input.indexOf(' ');
     //Create Strings to Later Print to Serial
-    String x1_s = "";
-    String v1_s = "";
-    String x2_s = "";
-    String v2_s = "";
-    String duration_s = "";
+    String del_x_s = "";
+    String dir_s = "";
+    String reset_s = "";
 
-    if (index != -1){ //Check if There is a Space Character
-     x1_s = input.substring(0, index); //Create a String by Copying From 0 to Position of First Space
+    if (index != -1) { //Check if There is a Space Character
+      del_x_s = input.substring(0, index); //Create a String by Copying From 0 to Position of First Space
      
-     if (index != -1){
-       input = input.substring(index+1); //Redefine Input Beginning After Indexed Space to End of Previous Input
-       index = input.indexOf(' ');
-       v1_s = input.substring(0, index); //Repeat for All Variables
-       
-       if (index != -1){    
+      if (index != -1) {
+        input = input.substring(index+1); //Redefine Input Beginning After Indexed Space to End of Previous Input
+        index = input.indexOf(' ');
+        dir_s = input.substring(0, index); //Repeat for All Variables
+        
+        if (index != -1) {    
          input = input.substring(index+1);
          index = input.indexOf(' ');
-         x2_s = input.substring(0, index);
-         
-         if (index != -1){    
-           input = input.substring(index+1);
-           index = input.indexOf(' ');
-           v2_s = input.substring(0, index);
-           
-           if (index != -1){    
-             input = input.substring(index+1);
-             index = input.indexOf(' ');
-             duration_s = input.substring(0, index);
-           }
-         }
-       }
+         reset_s = input.substring(0, index);
+        }
      }
     }
     //Convert All Strings to Floats
-    float x1 = x1_s.toFloat();
-    float v1 = v1_s.toFloat();
-    float x2 = x2_s.toFloat();
-    float v2 = v2_s.toFloat();
-    float duration = duration_s.toFloat();
-    float points[][5] = {x1,v1,x2,v2,duration};
+    float del_x = del_x_s.toFloat();
+    int dir = dir_s.toInt();
+    int reset = reset_s.toInt();
 
-    motionProfile(points, 1);
+    // confirm inputs read properly
+    Serial.print("del_x: ");
+    Serial.println(del_x, DEC);            // Print absolute position value
+    Serial.print("dir: ");
+    Serial.println(dir, DEC);
+    Serial.print("reset: ");
+    Serial.println(reset, DEC);
+    delay(1000);
+
+    moveToAngle(del_x, dir);
+
+    // if "reset" is passed in as true (1), just go back to initial position (roughly)
+    if (reset == 1) {
+      delay(5000);
+      dir ^= 1;
+      moveToAngle(del_x, dir);
+    }
     delay(1000);
   }
 }
 
-// Input an array of points to hit and the number of points in the array
-void motionProfile(float points[][5], int pointNumber) {
+void moveToAngle(float targetAngle, bool dir) {
   digitalWrite(enable1, HIGH);
-  float c[pointNumber][4]; // Initialize the c 2D-array
-  for (int i = 0; i < pointNumber; i++) { // Loop through all the points
-    // Solve the 4x4 Matrix to get polynomial coefficients
-    matrixSolver(gearRatio*points[i][0],gearRatio*points[i][1],0,\
-    gearRatio*points[i][2],gearRatio*points[i][3],points[i][4]);
 
-    // Set current c array row to current coefficients
-    c[i][0] = coeff[0];
-    c[i][1] = coeff[1];
-    c[i][2] = coeff[2];
-    c[i][3] = coeff[3];
+  // Change Direction based on Velocity Sign
+  if (dir == 0){ // Switch to negative direction
+    digitalWrite(direction1, LOW);
+    sign = -1;
+  } else { // Switch to positive direction1 when x2 is greater than x1
+    digitalWrite(direction1, HIGH);
+    sign = 1;
   }
 
-  // Loop through all points again
-  for (int i = 0; i < pointNumber; i++) {
-    float t = 0; // Inititalize t
-    float positionOut = points[i][0]; // Initialize positionOut
-    float tOld = 0; // Initialize tOld
-    
-    float c1 = c[i][0];
-    float c2 = c[i][1];
-    float c3 = c[i][2];
-    float c4 = c[i][3];
+  dacWrite(DAC1, 127);  // arbitrary constant speed for testing
 
-    float tStart = micros()*pow(10,-6); // Note the start time for relative time calculations
-    while (t < points[i][4]) { // While the current time is less than the end time
-      t = (micros()*pow(10,-6))-tStart; // Set new current relative time
-      // Calculate what the current velocity should be
-      float vel = 3*c1*pow(t,2) + 2*c2*t + c3; // Current Velocity in degs/s
-      float velocity = vel/6; // Convert from degs/s to RPM
-
-      // Change Direction based on Velocity Sign
-      if (velocity < 0){ // Switch to negative direction1 when x2 is less than x1
-      digitalWrite(direction1, LOW);
-      sign = -1;
-      }
-      if (velocity > 0){ // Switch to positive direction1 when x2 is greater than x1
-      digitalWrite(direction1, HIGH);
-      sign = 1;
-      }
-      
-      // Convert RPM to a Voltage
-      float volts = minVolt + (abs(velocity) - 0.0)*((maxVolt - minVolt)/(maxVel-minVel));
-      // Covert Voltage to DAC1 Output
-      int dacOut = round(0.0 + (volts - 0.0)*((255 - 0)/(maxVolt-0.0)));
-      
-      float voltsOut = 0.0 + (dacOut - 0.0)*((maxVolt-0.0)/(255-0)); // Map dacOut to "actual" Voltage
-      float velocityOut = 0.0 + (voltsOut - minVolt)*((maxVel-minVel)/(maxVolt-minVolt)); // Map "actual" Voltage to "actual" Velocity
-
-      positionOut = positionOut + sign*(velocityOut*6)*(t-tOld)/gearRatio; // Integrate "actual" velocity over time to get "actual" position
-      float position = (c1*pow(t,3) + c2*pow(t,2) + c3*t + c4)/gearRatio; //  Caluclated Joint Position
-
-      // Check if the DAC1 Output is Outside of its Acceptable Range
-      if (dacOut < 0 || dacOut > 255) {
-        dacOut = max(min(255, dacOut), 0); // If out of the Acceptable Range
-      }
-
-      dacWrite(DAC1, dacOut);
-
-      Serial.print(t, 5);
-      Serial.print(",");
-      Serial.print(velocity);
-      Serial.print(",");
-      Serial.print(dacOut);
-      Serial.print(",");
-      Serial.print(position);
-      Serial.print(",");
-      Serial.print(positionOut);
-      Serial.print(",");
-      Serial.print(voltsOut);
-      Serial.println();
-      tOld = t;
-      
-      // encoder reading during trajectory
-      uint16_t position_14bit = readEncoderPosition14Bit();
-      float position_float = encoderReadingToDeg(position_14bit);
-      printEncoderPosition(position_14bit, position_float);
-      float pos_error = position_float - positionOut;
-      Serial.print("Position error (encoder reading - positionOut) = ");
-      Serial.println(pos_error);
-    }
-    dacWrite(DAC1, 0);
+  uint16_t position_14bit = readEncoderPosition14Bit();
+  float position_float = encoderReadingToDeg(position_14bit);
+  // run at constant vel until encoder reads targetAngle, then stop motor
+  while (position_float < targetAngle) {
+    printEncoderPosition(position_14bit, position_float);
+    position_14bit = readEncoderPosition14Bit();
+    position_float = encoderReadingToDeg(position_14bit);
   }
+  dacWrite(DAC1, 0);
   digitalWrite(enable1, LOW);
 }
 
