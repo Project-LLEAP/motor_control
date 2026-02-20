@@ -1,5 +1,5 @@
 /**
-input as follows: inital postion, inital velocity, final postion, final velocity, duration
+input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 */
 
 #include <SPI.h>
@@ -11,12 +11,6 @@ input as follows: inital postion, inital velocity, final postion, final velocity
 #define direction1 32 //Motor Direction Pin 1 (HIGH is Positive Direction, LOW is Negative Direction)
 #define enable2 23 //Motor Enable Pin 2
 #define direction2 19 //Motor Direction Pin 2 (HIGH is Positive Direction, LOW is Negative Direction)
-
-#define gearRatio 25 // Gear Ratio (120.4 w/ Cycloidal, 28, + Planetary, 4.3)
-#define maxVel 1000.0 // Maximum Velocity of Motor (RPM)
-#define minVel 0.0 // Minimum Velocity of Motor (RPM)
-#define maxVolt 3.3 // Maximum Voltage from ESP32 
-#define minVolt 0.1 // Minimum Voltage accepted by Motor Driver
 
 // encoder defines
 #define CS_PIN 5           // Chip select connected to digital pin 2
@@ -113,7 +107,7 @@ void moveToAngle(float targetAngle, bool dir) {
     sign = 1;
   }
 
-  dacWrite(DAC1, 127);  // arbitrary constant speed for testing
+  dacWrite(DAC1, 10);  // arbitrary constant speed for testing
 
   uint16_t position_14bit = readEncoderPosition14Bit();
   float position_float = encoderReadingToDeg(position_14bit);
