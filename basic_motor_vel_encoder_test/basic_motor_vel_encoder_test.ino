@@ -1,16 +1,13 @@
 /**
-input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
+input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1), vel [0-255]
 */
 
 #include <SPI.h>
 
 // Motor control defines
 #define DAC1 25 //Speed Controller Pin 1
-#define DAC2 26 //Speed Controller Pin 2
 #define enable1 33 //Motor Enable Pin 1
 #define direction1 32 //Motor Direction Pin 1 (HIGH is Positive Direction, LOW is Negative Direction)
-#define enable2 23 //Motor Enable Pin 2
-#define direction2 19 //Motor Direction Pin 2 (HIGH is Positive Direction, LOW is Negative Direction)
 
 // encoder defines
 #define CS_PIN 5           // Chip select connected to digital pin 2
@@ -53,6 +50,7 @@ void loop() {
     String del_x_s = "";
     String dir_s = "";
     String reset_s = "";
+    String vel_8bit_s = "";
 
     if (index != -1) { //Check if There is a Space Character
       del_x_s = input.substring(0, index); //Create a String by Copying From 0 to Position of First Space
@@ -63,9 +61,14 @@ void loop() {
         dir_s = input.substring(0, index); //Repeat for All Variables
         
         if (index != -1) {    
-         input = input.substring(index+1);
-         index = input.indexOf(' ');
-         reset_s = input.substring(0, index);
+          input = input.substring(index+1);
+          index = input.indexOf(' ');
+          reset_s = input.substring(0, index);
+          if (index != -1) {    
+            input = input.substring(index+1);
+            index = input.indexOf(' ');
+            vel_8bit_s = input.substring(0, index);
+        }
         }
      }
     }
@@ -73,6 +76,7 @@ void loop() {
     float del_x = del_x_s.toFloat();
     int dir = dir_s.toInt();
     int reset = reset_s.toInt();
+    int vel_8bit = vel_8bit_s.toInt();
 
     // confirm inputs read properly
     Serial.print("del_x: ");
@@ -81,21 +85,23 @@ void loop() {
     Serial.println(dir, DEC);
     Serial.print("reset: ");
     Serial.println(reset, DEC);
+    Serial.print("vel_8bit: ");
+    Serial.println(vel_8bit, DEC);
     delay(1000);
 
-    moveToAngle(del_x, dir);
+    moveToAngle(del_x, dir, vel_8bit);
 
     // if "reset" is passed in as true (1), just go back to initial position (roughly)
     if (reset == 1) {
       delay(5000);
       dir ^= 1;
-      moveToAngle(del_x, dir);
+      moveToAngle(del_x, dir, vel_8bit);
     }
     delay(1000);
   }
 }
 
-void moveToAngle(float targetAngle, bool dir) {
+void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   digitalWrite(enable1, HIGH);
 
   // Change Direction based on Velocity Sign
@@ -107,7 +113,7 @@ void moveToAngle(float targetAngle, bool dir) {
     sign = 1;
   }
 
-  dacWrite(DAC1, 10);  // arbitrary constant speed for testing
+  dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
 
   uint16_t position_14bit = readEncoderPosition14Bit();
   float position_float = encoderReadingToDeg(position_14bit);
