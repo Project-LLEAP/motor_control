@@ -15,8 +15,6 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
 
-int sign = 1; // Create Global sign variable and initialize to 1
-
 void setup() {
   Serial.begin(115200); //Start Serial Communication Rate at This Value
   delay(1000);
@@ -40,6 +38,7 @@ void loop() {
   delay(500);
   uint16_t position_14bit = readEncoderPosition14Bit();
   float position_float = encoderReadingToDeg(position_14bit);
+  Serial.print("In main loop (not in moveToAngle)");
   printEncoderPosition(position_14bit, position_float);
 
   // main code to run repeatedly:
@@ -107,10 +106,8 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   // Change Direction based on Velocity Sign
   if (dir == 0){ // Switch to negative direction
     digitalWrite(direction1, LOW);
-    sign = -1;
   } else { // Switch to positive direction1 when x2 is greater than x1
     digitalWrite(direction1, HIGH);
-    sign = 1;
   }
 
   dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
