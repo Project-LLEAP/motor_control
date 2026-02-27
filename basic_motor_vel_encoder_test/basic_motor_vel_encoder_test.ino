@@ -5,18 +5,19 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #include <SPI.h>
 
 // Motor control defines
-#define DAC1 25 //Speed Controller Pin 1
-#define enable1 33 //Motor Enable Pin 1
-#define direction1 32 //Motor Direction Pin 1 (HIGH is Positive Direction, LOW is Negative Direction)
+#define DAC1 25 // Speed Controller Pin 1
+#define enable1 33 // Motor Enable Pin 1
+#define direction1 32 // Motor Direction Pin 1 (HIGH is Positive Direction, LOW is Negative Direction)
 
 // encoder defines
 #define CS_PIN 5           // Chip select connected to digital pin 2
 #define AMT22_NOP 0x00     // No-operation byte per datasheet
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
+#define MOTOR_MOVEMENT_TOLERANGE_DEG 2.0
 
 void setup() {
-  Serial.begin(115200); //Start Serial Communication Rate at This Value
+  Serial.begin(115200); // Start Serial Communication Rate at This Value
   delay(1000);
 
   // setup pins for encoder and motor controller
@@ -51,13 +52,13 @@ void loop() {
     String reset_s = "";
     String vel_8bit_s = "";
 
-    if (index != -1) { //Check if There is a Space Character
-      del_x_s = input.substring(0, index); //Create a String by Copying From 0 to Position of First Space
+    if (index != -1) { // Check if There is a Space Character
+      del_x_s = input.substring(0, index); // Create a String by Copying From 0 to Position of First Space
      
       if (index != -1) {
-        input = input.substring(index+1); //Redefine Input Beginning After Indexed Space to End of Previous Input
+        input = input.substring(index+1); // Redefine Input Beginning After Indexed Space to End of Previous Input
         index = input.indexOf(' ');
-        dir_s = input.substring(0, index); //Repeat for All Variables
+        dir_s = input.substring(0, index); // Repeat for All Variables
         
         if (index != -1) {    
           input = input.substring(index+1);
@@ -101,26 +102,50 @@ void loop() {
 }
 
 void moveToAngle(float targetAngle, int dir, int vel_8bit) {
+  // turn the motor on
   digitalWrite(enable1, HIGH);
 
   // Change Direction based on Velocity Sign
-  if (dir == 0){ // Switch to negative direction
-    digitalWrite(direction1, LOW);
-  } else { // Switch to positive direction1 when x2 is greater than x1
-    digitalWrite(direction1, HIGH);
-  }
+  if (dir == 0){ digitalWrite(direction1, LOW); } // Switch to negative direction 
+  else { digitalWrite(direction1, HIGH); } // Switch to positive direction1 when x2 is greater than x1
 
   dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
 
   uint16_t position_14bit = readEncoderPosition14Bit();
   float position_float = encoderReadingToDeg(position_14bit);
+
+  float lastRawAngle = position_float;
+  float cumulativeAngle = 0;
+
   // run at constant vel until encoder reads targetAngle, then stop motor
-  while (position_float < targetAngle) {
+  while (true) {
     printEncoderPosition(position_14bit, position_float);
     position_14bit = readEncoderPosition14Bit();
     position_float = encoderReadingToDeg(position_14bit);
+    
+    // find the change between the last recorded angle and the current angle
+    int delta = position_float - lastRawAngle;
+
+    // if the delta is huge, we must've jumped
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+
+    // accumulate angle data and update prev
+    cumulativeAngle += delta;
+    lastRawAngle = position_float;
+
+    float error = targetAngle - cumulativeAngle;
+
+    // if the angle is within an acceptable tolerance of the target angle
+    if (abs(error) < MOTOR_MOVEMENT_TOLERANGE_DEG) {
+      break;
+    }
+
   }
+
   dacWrite(DAC1, 0);
+  
+  // shutoff the motor
   digitalWrite(enable1, LOW);
 }
 
