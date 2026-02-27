@@ -115,7 +115,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   float position_float = encoderReadingToDeg(position_14bit);
 
   float lastRawAngle = position_float;
-  float cumulativeAngle = 0;
+  float cumulativeAngle = position_float;
 
   // run at constant vel until encoder reads targetAngle, then stop motor
   while (true) {
@@ -124,7 +124,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     position_float = encoderReadingToDeg(position_14bit);
     
     // find the change between the last recorded angle and the current angle
-    int delta = position_float - lastRawAngle;
+    float delta = position_float - lastRawAngle;
 
     // if the delta is huge, we must've jumped
     if (delta > 180) delta -= 360;
