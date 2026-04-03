@@ -14,7 +14,7 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define AMT22_NOP 0x00     // No-operation byte per datasheet
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
-#define MOTOR_MOVEMENT_TOLERANGE_DEG 2.0f    // Error margine to check the angle
+#define MOTOR_MOVEMENT_TOLERANCE_DEG 2.0f    // Error margine to check the angle
 #define DECEL_ZONE_DEG               15.0f   // start slowing down 15° before target
 #define MIN_VEL_8BIT                 30      // minimum voltage to keep motor moving
 
@@ -22,6 +22,8 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define KP              2.0f    // k proportional 
 #define KI              0.0f    // start at zero -- accumulated error
 #define KD              0.0f    // start at zero -- how fast error is changing right now
+#define MAX_DELTA_DEG  5.0f  // tune this — start conservative
+
 #define INTEGRAL_LIMIT  50.0f
 
 #define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
@@ -165,6 +167,16 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     float delta = position_float - lastRawAngle;
     if (delta >  180.0f) delta -= 360.0f;
     if (delta < -180.0f) delta += 360.0f;
+
+    // ✅ Spike filter — reject physically impossible deltas
+    if (abs(delta) > MAX_DELTA_DEG) {
+      Serial.print("WARNING: Spike rejected, delta=");
+      Serial.println(delta);
+      lastRawAngle = position_float;  // update reference but don't accumulate
+      delay(LOOP_DELAY_MS);
+      continue;  // skip this iteration entirely
+    }
+
     cumulativeAngle += delta;
     lastRawAngle     = position_float;
 
