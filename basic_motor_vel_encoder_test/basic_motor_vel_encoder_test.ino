@@ -18,7 +18,7 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define DECEL_ZONE_DEG               15.0f   // start slowing down 15° before target
 #define MIN_VEL_8BIT                 30      // minimum voltage to keep motor moving
 
-//#define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
+#define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
 
 void setup() {
   Serial.begin(115200); // Start Serial Communication Rate at This Value
@@ -119,6 +119,8 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   float lastRawAngle      = encoderReadingToDeg(position_14bit);
   float cumulativeAngle   = 0;
 
+  const float HALTING_DEG = targetAngle - DECEL_ZONE_DEG;
+
 
   // run 
   dacWrite(DAC1, vel_8bit);
@@ -147,7 +149,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
       break;
     }
     // Proportional speed scaling 
-    if(cumulativeAngle >= abs(targetAngle - DECEL_ZONE_DEG)) {
+    if(cumulativeAngle >= HALTING_DEG) {
       // get the scale to slow the motor down relative to the final angle 
       float scale = cumulativeAngle / targetAngle;
 
