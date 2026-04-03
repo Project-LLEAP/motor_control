@@ -18,14 +18,6 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define DECEL_ZONE_DEG               15.0f   // start slowing down 15° before target
 #define MIN_VEL_8BIT                 30      // minimum voltage to keep motor moving
 
-// PID variables
-#define KP              2.0f    // k proportional 
-#define KI              0.0f    // start at zero -- accumulated error
-#define KD              0.0f    // start at zero -- how fast error is changing right now
-#define MAX_DELTA_DEG  5.0f  // tune this — start conservative
-
-#define INTEGRAL_LIMIT  50.0f
-
 #define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
 
 void setup() {
@@ -114,96 +106,68 @@ void loop() {
   }
 }
 
-int computePID(float error, float deltaTime, float &integral, float &lastError) {
-  float P          = KP * error;
-
-  integral        += error * deltaTime;
-  if (integral >  INTEGRAL_LIMIT) integral =  INTEGRAL_LIMIT;
-  if (integral < -INTEGRAL_LIMIT) integral = -INTEGRAL_LIMIT;
-  float I          = KI * integral;
-
-  float derivative = (error - lastError) / deltaTime;
-  float D          = KD * derivative;
-  lastError        = error;
-
-  float output     = P + I + D;
-  int command_vel  = (int)abs(output);
-  if (command_vel < MIN_VEL_8BIT) command_vel = MIN_VEL_8BIT;
-  if (command_vel > 255)          command_vel = 255;
-
-  return command_vel;
-}
-
 void moveToAngle(float targetAngle, int dir, int vel_8bit) {
-
+  // turn the motor on
   digitalWrite(enable1, HIGH);
-  if (dir == 0) { digitalWrite(direction1, LOW);  }
-  else          { digitalWrite(direction1, HIGH); }
 
+  // Change Direction based on Velocity Sign
+  if (dir == 0){ digitalWrite(direction1, LOW); } // Switch to negative direction 
+  else { digitalWrite(direction1, HIGH); } // Switch to positive direction1 when x2 is greater than x1
+  
+  // Read starting position
   uint16_t position_14bit = readEncoderPosition14Bit();
-  if (position_14bit == 0xFFFF) {
-    Serial.println("ERROR: Bad initial encoder read. Aborting.");
-    digitalWrite(enable1, LOW);
-    return;
-  }
+  float lastRawAngle      = encoderReadingToDeg(position_14bit);
+  float cumulativeAngle   = 0;
 
-  float lastRawAngle    = encoderReadingToDeg(position_14bit);
-  float cumulativeAngle = 0;
+  const float HALTING_DEG = targetAngle - DECEL_ZONE_DEG;
 
-  // PID state
-  float integral         = 0.0f;
-  float lastError        = targetAngle;
-  unsigned long lastTime = millis();
 
-  dacWrite(DAC1, vel_8bit);  // initial kick
+  // run 
+  dacWrite(DAC1, vel_8bit);
 
+  // run at constant vel until encoder reads targetAngle, then stop motor
   while (true) {
 
     position_14bit = readEncoderPosition14Bit();
-    if (position_14bit == 0xFFFF) { delay(LOOP_DELAY_MS); continue; }
-
     float position_float = encoderReadingToDeg(position_14bit);
+    printEncoderPosition(position_14bit, position_float);
 
+    // find the change between the last recorded angle and the current angle
     float delta = position_float - lastRawAngle;
-    if (delta >  180.0f) delta -= 360.0f;
-    if (delta < -180.0f) delta += 360.0f;
 
-    // ✅ Spike filter — reject physically impossible deltas
-    if (abs(delta) > MAX_DELTA_DEG) {
-      Serial.print("WARNING: Spike rejected, delta=");
-      Serial.println(delta);
-      lastRawAngle = position_float;  // update reference but don't accumulate
-      delay(LOOP_DELAY_MS);
-      continue;  // skip this iteration entirely
-    }
+    // if the delta is huge, we must've jumped
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
 
+    // accumulate angle data and update prev
     cumulativeAngle += delta;
-    lastRawAngle     = position_float;
-
-    float error = targetAngle - cumulativeAngle;
-
-    // Delta time
-    unsigned long currentTime = millis();
-    float dt = (currentTime - lastTime) / 1000.0f;
-    if (dt <= 0.0f) dt = LOOP_DELAY_MS / 1000.0f;
-    lastTime = currentTime;
-
-   
-    // Stop condition
-    if (abs(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
+    lastRawAngle = position_float;
+    
+    // if the angle is within an acceptable tolerance of the target angle
+    if (abs(cumulativeAngle) >= abs(targetAngle)) {
       Serial.println("Target reached!");
       break;
     }
+    // Proportional speed scaling 
+    if(cumulativeAngle >= HALTING_DEG) {
+      // get the scale to slow the motor down relative to the final angle 
+      float scale = cumulativeAngle / targetAngle;
 
-    // PID controls speed
-    dacWrite(DAC1, computePID(error, dt, integral, lastError));
-
-    Serial.print("Cumulative: "); Serial.print(cumulativeAngle);
-    Serial.print(" | Error: ");   Serial.print(error);
+      // parse to an int to send
+      int command_vel = (int)(vel_8bit * scale);
+      // set a minimum so it doesnt slow down to a stalling state
+      if(command_vel < MIN_VEL_8BIT) {
+        command_vel = MIN_VEL_8BIT;
+      }
+      dacWrite(DAC1, command_vel);
+    }
+    printEncoderPosition(position_14bit, position_float);
     delay(LOOP_DELAY_MS);
   }
 
   dacWrite(DAC1, 0);
+  
+  // shutoff the motor
   digitalWrite(enable1, LOW);
 }
 
