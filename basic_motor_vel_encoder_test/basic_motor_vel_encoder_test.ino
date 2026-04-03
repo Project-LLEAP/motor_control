@@ -14,7 +14,11 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define AMT22_NOP 0x00     // No-operation byte per datasheet
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
-#define MOTOR_MOVEMENT_TOLERANGE_DEG 5.0
+#define MOTOR_MOVEMENT_TOLERANGE_DEG 2.0f    // Error margine to check the angle
+#define DECEL_ZONE_DEG               15.0f   // start slowing down 15° before target
+#define MIN_VEL_8BIT                 30      // minimum voltage to keep motor moving
+
+//#define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
 
 void setup() {
   Serial.begin(115200); // Start Serial Communication Rate at This Value
@@ -109,21 +113,18 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   // Change Direction based on Velocity Sign
   if (dir == 0){ digitalWrite(direction1, LOW); } // Switch to negative direction 
   else { digitalWrite(direction1, HIGH); } // Switch to positive direction1 when x2 is greater than x1
-
-  dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
-
+  
+  // Read starting position
   uint16_t position_14bit = readEncoderPosition14Bit();
-  float position_float = encoderReadingToDeg(position_14bit);
-
-  float lastRawAngle = position_float;
-  float cumulativeAngle = 0;
-
+  float lastRawAngle      = encoderReadingToDeg(position_14bit);
+  float cumulativeAngle   = 0;
 
   // run at constant vel until encoder reads targetAngle, then stop motor
   while (true) {
     printEncoderPosition(position_14bit, position_float);
+
     position_14bit = readEncoderPosition14Bit();
-    position_float = encoderReadingToDeg(position_14bit);
+    float position_float = encoderReadingToDeg(position_14bit);
 
     // find the change between the last recorded angle and the current angle
     float delta = position_float - lastRawAngle;
@@ -145,6 +146,21 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
       break;
     }
 
+    // Proportional speed scaling 
+    int command_vel = vel_8bit;
+    if(abs(error) < DECEL_ZONE_DEG) {
+      // get the scale to slow the motor down relative to the final angle 
+      float scale = abs(error) / DECEL_ZONE_DEG;
+
+      // parse to an int to send
+      command_vel = (int)(vel_8bit * scale)
+      // set a minimum so it doesnt slow down to a stalling state
+      if(command_vel < MIN_VEL_8BIT) command_vel = MIN_VEL_8BIT;
+    }
+    dacWrite(DAC1, commanded_vel);
+    printEncoderPosition(position_14bit, position_float);
+
+    delay(LOOP_DELAY_MS)
   }
 
   dacWrite(DAC1, 0);
@@ -216,4 +232,3 @@ void setZeroSPI(uint8_t cs_pin)
 
   delay(250); //250 millisecond delay to allow the encoder to reset
 }
-
