@@ -143,6 +143,9 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     cumulativeAngle += delta;
     lastRawAngle = position_float;
     
+    error = targetAngle - cumulativeAngle;
+    Serial.print("ERROR: ");
+    Serial.println(error);
     // if the angle is within an acceptable tolerance of the target angle
     if (abs(cumulativeAngle) >= abs(targetAngle)) {
       Serial.println("Target reached!");
