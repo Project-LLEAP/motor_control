@@ -81,7 +81,7 @@ void loop() {
     int dir = dir_s.toInt();
     int reset = reset_s.toInt();
     //int vel_8bit = vel_8bit_s.toInt();
-    int vel_8bit = 175;
+    int vel_8bit = 50;
 
     // confirm inputs read properly
     Serial.print("del_x: ");
@@ -136,6 +136,8 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     float delta = position_float - lastRawAngle;
 
     // if the delta is huge, we must've jumped
+    Serial.print("DELTA: ");
+    Serial.println(delta);
     if (delta > 180) delta -= 360;
     if (delta < -180) delta += 360;
 
@@ -143,7 +145,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     cumulativeAngle += delta;
     lastRawAngle = position_float;
     
-    error = targetAngle - cumulativeAngle;
+    float error = targetAngle - cumulativeAngle;
     Serial.print("ERROR: ");
     Serial.println(error);
     // if the angle is within an acceptable tolerance of the target angle
