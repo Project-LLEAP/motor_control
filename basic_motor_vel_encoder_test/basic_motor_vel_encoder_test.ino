@@ -157,7 +157,9 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
       // parse to an int to send
       int command_vel = (int)(vel_8bit * scale);
       // set a minimum so it doesnt slow down to a stalling state
-      if(command_vel < MIN_VEL_8BIT) command_vel = MIN_VEL_8BIT;
+      if(command_vel < MIN_VEL_8BIT) {
+        command_vel = MIN_VEL_8BIT;
+      }
       dacWrite(DAC1, command_vel);
     }
     printEncoderPosition(position_14bit, position_float);
