@@ -119,6 +119,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   float lastRawAngle      = encoderReadingToDeg(position_14bit);
   float cumulativeAngle   = 0;
 
+
   // run 
   dacWrite(DAC1, vel_8bit);
 
@@ -140,19 +141,15 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     cumulativeAngle += delta;
     lastRawAngle = position_float;
     
-    float error = targetAngle - cumulativeAngle;
-    Serial.print("Error: "); 
-    Serial.println(error);
-
     // if the angle is within an acceptable tolerance of the target angle
-    if (abs(error) < MOTOR_MOVEMENT_TOLERANGE_DEG) {
+    if (abs(cumulativeAngle) >= abs(targetAngle)) {
+      Serial.println("Target reached!");
       break;
     }
-
     // Proportional speed scaling 
-    if(abs(error) < DECEL_ZONE_DEG) {
+    if(cumulativeAngle >= abs(targetAngle - DECEL_ZONE_DEG)) {
       // get the scale to slow the motor down relative to the final angle 
-      float scale = abs(error) / DECEL_ZONE_DEG;
+      float scale = cumulativeAngle / targetAngle;
 
       // parse to an int to send
       int command_vel = (int)(vel_8bit * scale);
