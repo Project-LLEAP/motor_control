@@ -14,6 +14,7 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define AMT22_NOP 0x00     // No-operation byte per datasheet
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
+#define MOTOR_MOVEMENT_TOLERANGE_DEG 10 
 
 void setup() {
   Serial.begin(115200); //Start Serial Communication Rate at This Value
@@ -100,27 +101,79 @@ void loop() {
   }
 }
 
+/*
+
+- targetAngle is the absolute angle we want it to move to
+- we knew our current position with position_float, which is updated every while loop
+- given a current position and a targetAngle, stop when the current position reaches targetAngle
+
+we have three versions. 
+1. keep running until the current read angle reaches the target angle (with tolerance)
+
+      the most straightforward logic, which we tried first.
+      this didn't work previously, but we didn't try it with tolerance
+      if it stops with tolerance value, then the problem is probably the sampling rate not the code
+
+2. cumulative angle is a calculated relative angle moved, found by adding small deltas together
+
+      the point is to check delta for whether the delta is huge.
+      the error grows infinitely large for the negative direction
+
+      now that i'm looking at this again...
+      what's the difference between cumulative angle and the current read position? aren't they the same, 
+        except cumulative angle is less accurate due to sampling rate?
+      i think the goal was to make logic that would work for both directions, and then we added a tolerance value
+
+      i dont have the updated code, so ill put this on hold for now
+            
+3. create a break point (this version)
+
+      four cases:
+        CLOCKWISE
+        1. target angle > start angle
+        2. target angle < start angle
+        COUNTER-CLOCKWISE
+        3. target angle < start angle
+        4. target angle > start angle
+
+      my only problem is that creating a break point doubles the margin of error. what if the encoder never 
+        reads the breakpoint either? mega cooked
+      this will NOT solve the problem if the sampling rate is the problem
+      test the first version of this code first WITH A TOLERANCE to check whether its the sampling rate only
+
+*/
+
+
+
 void moveToAngle(float targetAngle, int dir, int vel_8bit) {
+
+  // turn the motor on
   digitalWrite(enable1, HIGH);
 
   // Change Direction based on Velocity Sign
-  if (dir == 0){ // Switch to negative direction
-    digitalWrite(direction1, LOW);
-  } else { // Switch to positive direction1 when x2 is greater than x1
-    digitalWrite(direction1, HIGH);
-  }
+  if (dir == 0) { digitalWrite(direction1, LOW); } // Switch to negative direction 
+  else { digitalWrite(direction1, HIGH); } // Switch to positive direction1 when x2 is greater than x1
 
   dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
 
   uint16_t position_14bit = readEncoderPosition14Bit();
-  float position_float = encoderReadingToDeg(position_14bit);
+  float position_float = encoderReadingToDeg(position_14bit); // our current position
+
   // run at constant vel until encoder reads targetAngle, then stop motor
-  while (position_float < targetAngle) {
+
+  while (true) {
     printEncoderPosition(position_14bit, position_float);
     position_14bit = readEncoderPosition14Bit();
     position_float = encoderReadingToDeg(position_14bit);
+
+    float error = targetAngle - position_float;
+    if (abs(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
+      break;
+    }
   }
   dacWrite(DAC1, 0);
+  
+  // shutoff the motor
   digitalWrite(enable1, LOW);
 }
 
