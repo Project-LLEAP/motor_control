@@ -14,7 +14,7 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define AMT22_NOP 0x00     // No-operation byte per datasheet
 #define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
 #define AMT22_ZERO 0x70
-#define MOTOR_MOVEMENT_TOLERANGE_DEG 2.0
+#define MOTOR_MOVEMENT_TOLERANGE_DEG 5.0
 
 void setup() {
   Serial.begin(115200); // Start Serial Communication Rate at This Value
@@ -76,7 +76,8 @@ void loop() {
     float del_x = del_x_s.toFloat();
     int dir = dir_s.toInt();
     int reset = reset_s.toInt();
-    int vel_8bit = vel_8bit_s.toInt();
+    //int vel_8bit = vel_8bit_s.toInt();
+    int vel_8bit = 175;
 
     // confirm inputs read properly
     Serial.print("del_x: ");
@@ -115,14 +116,15 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   float position_float = encoderReadingToDeg(position_14bit);
 
   float lastRawAngle = position_float;
-  float cumulativeAngle = position_float;
+  float cumulativeAngle = 0;
+
 
   // run at constant vel until encoder reads targetAngle, then stop motor
   while (true) {
     printEncoderPosition(position_14bit, position_float);
     position_14bit = readEncoderPosition14Bit();
     position_float = encoderReadingToDeg(position_14bit);
-    
+
     // find the change between the last recorded angle and the current angle
     float delta = position_float - lastRawAngle;
 
@@ -133,8 +135,10 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
     // accumulate angle data and update prev
     cumulativeAngle += delta;
     lastRawAngle = position_float;
-
+    
     float error = targetAngle - cumulativeAngle;
+    Serial.print("Error: "); 
+    Serial.println(error);
 
     // if the angle is within an acceptable tolerance of the target angle
     if (abs(error) < MOTOR_MOVEMENT_TOLERANGE_DEG) {
