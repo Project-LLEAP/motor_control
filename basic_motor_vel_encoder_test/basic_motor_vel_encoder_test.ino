@@ -16,9 +16,9 @@ input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1)
 #define AMT22_ZERO 0x70
 #define MOTOR_MOVEMENT_TOLERANCE_DEG 2.0f    // Error margine to check the angle
 #define DECEL_ZONE_DEG               15.0f   // start slowing down 15° before target
-#define MIN_VEL_8BIT                 30      // minimum voltage to keep motor moving
+#define MIN_VEL_8BIT                 20      // minimum voltage to keep motor moving
 
-#define LOOP_DELAY_MS                5       // yield to ESP32 watchdog
+#define LOOP_DELAY_MS                1       // yield to ESP32 watchdog
 
 void setup() {
   Serial.begin(115200); // Start Serial Communication Rate at This Value
@@ -81,7 +81,7 @@ void loop() {
     int dir = dir_s.toInt();
     int reset = reset_s.toInt();
     //int vel_8bit = vel_8bit_s.toInt();
-    int vel_8bit = 50;
+    int vel_8bit = 20;
 
     // confirm inputs read properly
     Serial.print("del_x: ");
@@ -94,7 +94,7 @@ void loop() {
     Serial.println(vel_8bit, DEC);
     delay(1000);
 
-    moveToAngle(del_x, dir, vel_8bit);
+    moveToAngle(del_x, dir, vel_8bit); //is relative to your current angle, not absolute
 
     // if "reset" is passed in as true (1), just go back to initial position (roughly)
     if (reset == 1) {
@@ -106,6 +106,7 @@ void loop() {
   }
 }
 
+//is relative to your current angle, not absolute
 void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   // turn the motor on
   digitalWrite(enable1, HIGH);
@@ -130,33 +131,34 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
 
     position_14bit = readEncoderPosition14Bit();
     float position_float = encoderReadingToDeg(position_14bit);
-    printEncoderPosition(position_14bit, position_float);
+    //printEncoderPosition(position_14bit, position_float);
 
     // find the change between the last recorded angle and the current angle
     float delta = position_float - lastRawAngle;
 
     // if the delta is huge, we must've jumped
-    Serial.print("DELTA: ");
-    Serial.println(delta);
+    //Serial.print("DELTA: ");
+    //Serial.println(delta);
     if (delta > 180) delta -= 360;
     if (delta < -180) delta += 360;
 
     // accumulate angle data and update prev
-    cumulativeAngle += delta;
+    cumulativeAngle += abs(delta);
     lastRawAngle = position_float;
     
     float error = targetAngle - cumulativeAngle;
-    Serial.print("ERROR: ");
-    Serial.println(error);
+    //Serial.print("ERROR: ");
+    //Serial.println(error);
     // if the angle is within an acceptable tolerance of the target angle
-    if (abs(cumulativeAngle) >= abs(targetAngle)) {
+    if (error <= 0) {
       Serial.println("Target reached!");
       break;
     }
     // Proportional speed scaling 
-    if(cumulativeAngle >= HALTING_DEG) {
+    if(error <= HALTING_DEG) {
+      float remaining = targetAngle - cumulativeAngle;
       // get the scale to slow the motor down relative to the final angle 
-      float scale = cumulativeAngle / targetAngle;
+      float scale = remaining / targetAngle;
 
       // parse to an int to send
       int command_vel = (int)(vel_8bit * scale);
@@ -166,7 +168,7 @@ void moveToAngle(float targetAngle, int dir, int vel_8bit) {
       }
       dacWrite(DAC1, command_vel);
     }
-    printEncoderPosition(position_14bit, position_float);
+    //printEncoderPosition(position_14bit, position_float);
     delay(LOOP_DELAY_MS);
   }
 
