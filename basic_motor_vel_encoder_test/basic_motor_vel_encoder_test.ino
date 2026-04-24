@@ -35,7 +35,7 @@ float kd = 0.0f;
  
 // Tunable max command
 int maxSpeedCmd = 255;
-int minSpeedCmd = 25;
+int minSpeedCmd = 30;
  
 // Anti-windup clamp
 float integral_limit = 50.0f;
@@ -54,7 +54,10 @@ float debug_error = 0.0f;
 float debug_u = 0.0f;
 int debug_vel = 0;
 int debug_dir = 0;
- 
+
+// current velocity
+volatile int curVel = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -69,6 +72,7 @@ void setup() {
  
   // Leave disabled on boot
   // setZeroSPI(CS_PIN);   // only run manually if needed
+
  
   target_pos = readEncoderPositionDeg();
  
@@ -149,21 +153,24 @@ void runController() {
     dir = 1;
   }
  
-  int vel = (int)fabsf(u);
+  curVel = (int)fabsf(u);
  
-  if (vel > 0 && vel < minSpeedCmd) {
-  vel = minSpeedCmd;
+  // make sure velocity is less than minSpeedCmd to prevent hitting motor deadband
+  if (curVel > 0 && curVel < minSpeedCmd) {
+  curVel = minSpeedCmd;
   }
  
  
-  if (vel > maxSpeedCmd) {
-    vel = maxSpeedCmd;
-  }
+  // cap velocity at max
+  if (curVel > maxSpeedCmd) {
+    curVel = maxSpeedCmd;
+  } 
  
-  setMotor(dir, vel);
+  // spin the motor
+  setMotor(dir, curVel);
  
   debug_u = u;
-  debug_vel = vel;
+  debug_vel = curVel;
   debug_dir = dir;
 }
  
@@ -188,6 +195,7 @@ void processSerial() {
 }
  
 void handleCommand(const char* cmd) {
+  // set to zero if z
   if (strcmp(cmd, "Z") == 0 || strcmp(cmd, "z") == 0) {
     disableMotor();
     setMotor(0, 0);
@@ -202,6 +210,7 @@ void handleCommand(const char* cmd) {
     return;
   }
  
+  // print status
   if (strcmp(cmd, "S") == 0 || strcmp(cmd, "s") == 0) {
     printStatus(readEncoderPositionDeg());
     return;
@@ -365,20 +374,38 @@ uint16_t readEncoderPosition14Bit(void) {
   delayMicroseconds(3);
  
   position |= SPI.transfer(AMT22_NOP);
+
+  if (verifyChecksumSPI(position)) {
+    digitalWrite(CS_PIN, HIGH);
+    SPI.endTransaction();
+  
+    position &= 0x3FFF;
+    return position;
+  } 
+  else {
+    return -1; // sentinel showing failure
+  }
  
-  digitalWrite(CS_PIN, HIGH);
-  SPI.endTransaction();
- 
-  position &= 0x3FFF;
-  return position;
 }
  
 float encoderReadingToDeg(uint16_t position) {
   return 360.0f * ((float)position / (NUM_POSITIONS_PER_REV - 1));
 }
  
-float readEncoderPositionDeg(void) {
-  return encoderReadingToDeg(readEncoderPosition14Bit());
+float readEncoderPositionDeg() {
+  static float prevAngle = -1;
+  uint16_t position = readEncoderPosition14Bit();
+  uint16_t negative_one = -1;
+
+  if (position != negative_one) {
+    float angle = encoderReadingToDeg(position);
+    prevAngle = angle;
+    return angle;
+  }
+
+  float predictedAngle = prevAngle + curVel * (micros() - lastControlTimeUs); // TODO: verify this
+  return predictedAngle; 
+
 }
  
 void setZeroSPI(uint8_t cs_pin) {
@@ -397,4 +424,18 @@ void setZeroSPI(uint8_t cs_pin) {
   SPI.endTransaction();
  
   delay(250);
+}
+
+/*
+ * calculate the checksums and then make sure they match what the encoder sent.
+ */
+bool verifyChecksumSPI(uint16_t message)
+{
+  //checksum is invert of XOR of bits, so start with 0b11, so things end up inverted
+  uint16_t checksum = 0x3;
+  for(int i = 0; i < 14; i += 2)
+  {
+    checksum ^= (message >> i) & 0x3;
+  }
+  return checksum == (message >> 14);
 }
