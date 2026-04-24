@@ -1,243 +1,400 @@
-/**
-input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1), vel [0-255]
-*/
-
 #include <SPI.h>
-
-// Motor control defines
-#define DAC1 25 //Speed Controller Pin 1
-#define enable1 33 //Motor Enable Pin 1
-#define direction1 32 //Motor Direction Pin 1 (HIGH is Positive Direction, LOW is Negative Direction)
-
-// encoder defines
-#define CS_PIN 5           // Chip select connected to digital pin 2
-#define AMT22_NOP 0x00     // No-operation byte per datasheet
-#define NUM_POSITIONS_PER_REV 16384  // 2^14 bit encoder
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+ 
+// Motor control pins
+#define DAC1 25
+#define enable1 33
+#define direction1 32
+ 
+// Encoder
+#define CS_PIN 5
+#define AMT22_NOP 0x00
 #define AMT22_ZERO 0x70
-#define MOTOR_MOVEMENT_TOLERANGE_DEG 10 
-
+#define NUM_POSITIONS_PER_REV 16384
+ 
+// Control settings
+#define MOTOR_MOVEMENT_TOLERANCE_DEG 0.5f
+#define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
+#define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
+ 
+// State
+bool motorEnabled = false;
+ 
+// Control state
+float target_pos = 0.0f;
+float prev_error = 0.0f;
+float integral_error = 0.0f;
+float derivative_error = 0.0f;
+ 
+// Tunable gains
+float kp = 5.0f;
+float ki = 0.0f;
+float kd = 0.0f;
+ 
+// Tunable max command
+int maxSpeedCmd = 255;
+int minSpeedCmd = 25;
+ 
+// Anti-windup clamp
+float integral_limit = 50.0f;
+ 
+// Serial command buffer
+char cmdBuffer[64];
+int cmdIndex = 0;
+ 
+// Timing
+uint32_t lastControlTimeUs = 0;
+uint32_t lastDebugTimeMs = 0;
+ 
+// Debug values
+float debug_current_pos = 0.0f;
+float debug_error = 0.0f;
+float debug_u = 0.0f;
+int debug_vel = 0;
+int debug_dir = 0;
+ 
 void setup() {
-  Serial.begin(115200); //Start Serial Communication Rate at This Value
-  delay(1000);
-
-  // setup pins for encoder and motor controller
+  Serial.begin(115200);
+  delay(500);
+ 
   setup_encoder();
   setup_motor_controller();
-
-  setZeroSPI(CS_PIN);
+ 
+  disableMotor();
+  setMotor(0, 0);
+ 
+  delay(100);
+ 
+  // Leave disabled on boot
+  // setZeroSPI(CS_PIN);   // only run manually if needed
+ 
+  target_pos = readEncoderPositionDeg();
+ 
+  lastControlTimeUs = micros();
+  lastDebugTimeMs = millis();
+ 
+  Serial.println("Controller ready.");
+  Serial.println("Motor is DISABLED.");
+  Serial.println("Commands:");
+  Serial.println("  E 1   -> enable motor");
+  Serial.println("  E 0   -> disable motor");
+  Serial.println("  T 45  -> set target angle");
+  Serial.println("  P 5   -> set kp");
+  Serial.println("  I 0   -> set ki");
+  Serial.println("  D 0   -> set kd");
+  Serial.println("  M 255 -> set max speed command");
+  Serial.println("  Z     -> zero encoder");
+  Serial.println("  S     -> print status");
+  printStatus(readEncoderPositionDeg());
 }
-
-void printEncoderPosition(uint16_t position_14bit, float position_float) {
-  Serial.print("Position (14 bit): ");
-  Serial.print(position_14bit, DEC);            // Print absolute position value
-  Serial.print(" = ");
-  Serial.print(position_float, DEC);
-  Serial.println(" deg");
-}
-
+ 
 void loop() {
-  delay(500);
-  uint16_t position_14bit = readEncoderPosition14Bit();
-  float position_float = encoderReadingToDeg(position_14bit);
-  Serial.print("In main loop (not in moveToAngle)");
-  printEncoderPosition(position_14bit, position_float);
-
-  // main code to run repeatedly:
-  if (Serial.available() > 0) { //Check if Serial Messages Were Recieved
-    String input = Serial.readString();
-    int index = input.indexOf(' ');
-    //Create Strings to Later Print to Serial
-    String del_x_s = "";
-    String dir_s = "";
-    String reset_s = "";
-    String vel_8bit_s = "";
-
-    if (index != -1) { //Check if There is a Space Character
-      del_x_s = input.substring(0, index); //Create a String by Copying From 0 to Position of First Space
-     
-      if (index != -1) {
-        input = input.substring(index+1); //Redefine Input Beginning After Indexed Space to End of Previous Input
-        index = input.indexOf(' ');
-        dir_s = input.substring(0, index); //Repeat for All Variables
-        
-        if (index != -1) {    
-          input = input.substring(index+1);
-          index = input.indexOf(' ');
-          reset_s = input.substring(0, index);
-          if (index != -1) {    
-            input = input.substring(index+1);
-            index = input.indexOf(' ');
-            vel_8bit_s = input.substring(0, index);
-        }
-        }
-     }
-    }
-    //Convert All Strings to Floats
-    float del_x = del_x_s.toFloat();
-    int dir = dir_s.toInt();
-    int reset = reset_s.toInt();
-    int vel_8bit = vel_8bit_s.toInt();
-
-    // confirm inputs read properly
-    Serial.print("del_x: ");
-    Serial.println(del_x, DEC);            // Print absolute position value
-    Serial.print("dir: ");
-    Serial.println(dir, DEC);
-    Serial.print("reset: ");
-    Serial.println(reset, DEC);
-    Serial.print("vel_8bit: ");
-    Serial.println(vel_8bit, DEC);
-    delay(1000);
-
-    moveToAngle(del_x, dir, vel_8bit);
-
-    // if "reset" is passed in as true (1), just go back to initial position (roughly)
-    if (reset == 1) {
-      delay(5000);
-      dir ^= 1;
-      moveToAngle(del_x, dir, vel_8bit);
-    }
-    delay(1000);
+  processSerial();
+ 
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - lastControlTimeUs) >= CONTROL_PERIOD_US) {
+    lastControlTimeUs += CONTROL_PERIOD_US;  // fixed-rate scheduling
+    runController();
+  }
+ 
+  uint32_t nowMs = millis();
+  if ((uint32_t)(nowMs - lastDebugTimeMs) >= DEBUG_PERIOD_MS) {
+    lastDebugTimeMs += DEBUG_PERIOD_MS;
+    printDebug();
   }
 }
-
-/*
-
-- targetAngle is the absolute angle we want it to move to
-- we knew our current position with position_float, which is updated every while loop
-- given a current position and a targetAngle, stop when the current position reaches targetAngle
-
-we have three versions. 
-1. keep running until the current read angle reaches the target angle (with tolerance)
-
-      the most straightforward logic, which we tried first.
-      this didn't work previously, but we didn't try it with tolerance
-      if it stops with tolerance value, then the problem is probably the sampling rate not the code
-
-2. cumulative angle is a calculated relative angle moved, found by adding small deltas together
-
-      the point is to check delta for whether the delta is huge.
-      the error grows infinitely large for the negative direction
-
-      now that i'm looking at this again...
-      what's the difference between cumulative angle and the current read position? aren't they the same, 
-        except cumulative angle is less accurate due to sampling rate?
-      i think the goal was to make logic that would work for both directions, and then we added a tolerance value
-
-      i dont have the updated code, so ill put this on hold for now
-            
-3. create a break point (this version)
-
-      four cases:
-        CLOCKWISE
-        1. target angle > start angle
-        2. target angle < start angle
-        COUNTER-CLOCKWISE
-        3. target angle < start angle
-        4. target angle > start angle
-
-      my only problem is that creating a break point doubles the margin of error. what if the encoder never 
-        reads the breakpoint either? mega cooked
-      this will NOT solve the problem if the sampling rate is the problem
-      test the first version of this code first WITH A TOLERANCE to check whether its the sampling rate only
-
-*/
-
-
-
-void moveToAngle(float targetAngle, int dir, int vel_8bit) {
-
-  // turn the motor on
-  digitalWrite(enable1, HIGH);
-
-  // Change Direction based on Velocity Sign
-  if (dir == 0) { digitalWrite(direction1, LOW); } // Switch to negative direction 
-  else { digitalWrite(direction1, HIGH); } // Switch to positive direction1 when x2 is greater than x1
-
-  dacWrite(DAC1, vel_8bit);  // arbitrary constant speed for testing
-
-  uint16_t position_14bit = readEncoderPosition14Bit();
-  float position_float = encoderReadingToDeg(position_14bit); // our current position
-
-  // run at constant vel until encoder reads targetAngle, then stop motor
-
-  while (true) {
-    printEncoderPosition(position_14bit, position_float);
-    position_14bit = readEncoderPosition14Bit();
-    position_float = encoderReadingToDeg(position_14bit);
-
-    float error = targetAngle - position_float;
-    if (abs(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
+ 
+void runController() {
+  float deltaT = CONTROL_PERIOD_US / 1.0e6f;
+ 
+  float current_pos = readEncoderPositionDeg();
+  float error = target_pos - current_pos;
+ 
+  debug_current_pos = current_pos;
+  debug_error = error;
+ 
+  if (!motorEnabled) {
+    setMotor(0, 0);
+    integral_error = 0.0f;
+    prev_error = error;
+    debug_u = 0.0f;
+    debug_vel = 0;
+    debug_dir = 0;
+    return;
+  }
+ 
+  if (fabsf(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
+    setMotor(0, 0);
+    integral_error = 0.0f;
+    prev_error = error;
+    debug_u = 0.0f;
+    debug_vel = 0;
+    debug_dir = 0;
+    return;
+  }
+ 
+  integral_error += error * deltaT;
+ 
+  if (integral_error > integral_limit) integral_error = integral_limit;
+  if (integral_error < -integral_limit) integral_error = -integral_limit;
+ 
+  derivative_error = (error - prev_error) / deltaT;
+  float u = (kp * error) + (ki * integral_error) + (kd * derivative_error);
+  prev_error = error;
+ 
+  int dir = 0;
+  if (u < 0.0f) {
+    dir = 1;
+  }
+ 
+  int vel = (int)fabsf(u);
+ 
+  if (vel > 0 && vel < minSpeedCmd) {
+  vel = minSpeedCmd;
+  }
+ 
+ 
+  if (vel > maxSpeedCmd) {
+    vel = maxSpeedCmd;
+  }
+ 
+  setMotor(dir, vel);
+ 
+  debug_u = u;
+  debug_vel = vel;
+  debug_dir = dir;
+}
+ 
+void processSerial() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+ 
+    if (c == '\r') continue;
+ 
+    if (c == '\n') {
+      cmdBuffer[cmdIndex] = '\0';
+      if (cmdIndex > 0) {
+        handleCommand(cmdBuffer);
+      }
+      cmdIndex = 0;
+    } else {
+      if (cmdIndex < (int)sizeof(cmdBuffer) - 1) {
+        cmdBuffer[cmdIndex++] = c;
+      }
+    }
+  }
+}
+ 
+void handleCommand(const char* cmd) {
+  if (strcmp(cmd, "Z") == 0 || strcmp(cmd, "z") == 0) {
+    disableMotor();
+    setMotor(0, 0);
+    delay(50);
+    setZeroSPI(CS_PIN);
+    delay(50);
+    target_pos = readEncoderPositionDeg();
+    integral_error = 0.0f;
+    prev_error = 0.0f;
+    Serial.println("Encoder zeroed. Motor disabled. Target set to current position.");
+    printStatus(readEncoderPositionDeg());
+    return;
+  }
+ 
+  if (strcmp(cmd, "S") == 0 || strcmp(cmd, "s") == 0) {
+    printStatus(readEncoderPositionDeg());
+    return;
+  }
+ 
+  char key;
+  float value;
+  if (sscanf(cmd, "%c %f", &key, &value) != 2) {
+    Serial.println("Bad command.");
+    return;
+  }
+ 
+  switch (key) {
+    case 'P':
+    case 'p':
+      kp = value;
+      Serial.print("kp = ");
+      Serial.println(kp, 6);
       break;
-    }
+ 
+    case 'I':
+    case 'i':
+      ki = value;
+      integral_error = 0.0f;
+      Serial.print("ki = ");
+      Serial.println(ki, 6);
+      break;
+ 
+    case 'D':
+    case 'd':
+      kd = value;
+      Serial.print("kd = ");
+      Serial.println(kd, 6);
+      break;
+ 
+    case 'T':
+    case 't':
+      target_pos = value;
+      if (target_pos < 0.0f) target_pos = 0.0f;
+      if (target_pos >= 360.0f) target_pos = fmodf(target_pos, 360.0f);
+      Serial.print("target_pos = ");
+      Serial.println(target_pos, 3);
+      break;
+ 
+    case 'M':
+    case 'm':
+      maxSpeedCmd = (int)value;
+      if (maxSpeedCmd < 0) maxSpeedCmd = 0;
+      if (maxSpeedCmd > 255) maxSpeedCmd = 255;
+      Serial.print("maxSpeedCmd = ");
+      Serial.println(maxSpeedCmd);
+      break;
+ 
+    case 'E':
+    case 'e':
+      if ((int)value == 1) {
+        enableMotor();
+        target_pos = readEncoderPositionDeg();
+        integral_error = 0.0f;
+        prev_error = 0.0f;
+        Serial.println("Motor ENABLED. Target reset to current position.");
+      } else {
+        disableMotor();
+        setMotor(0, 0);
+        integral_error = 0.0f;
+        prev_error = 0.0f;
+        Serial.println("Motor DISABLED.");
+      }
+      break;
+ 
+    default:
+      Serial.println("Unknown command.");
+      break;
   }
-  dacWrite(DAC1, 0);
-  
-  // shutoff the motor
-  digitalWrite(enable1, LOW);
 }
-
+ 
+void printDebug() {
+  Serial.print("cur=");
+  Serial.print(debug_current_pos, 2);
+  Serial.print(" tgt=");
+  Serial.print(target_pos, 2);
+  Serial.print(" err=");
+  Serial.print(debug_error, 2);
+  Serial.print(" u=");
+  Serial.print(debug_u, 2);
+  Serial.print(" vel=");
+  Serial.print(debug_vel);
+  Serial.print(" dir=");
+  Serial.println(debug_dir);
+}
+ 
+void printStatus(float current_pos) {
+  Serial.println("----- STATUS -----");
+  Serial.print("enabled: ");
+  Serial.println(motorEnabled ? "YES" : "NO");
+  Serial.print("current_pos: ");
+  Serial.println(current_pos, 3);
+  Serial.print("target_pos: ");
+  Serial.println(target_pos, 3);
+  Serial.print("kp: ");
+  Serial.println(kp, 6);
+  Serial.print("ki: ");
+  Serial.println(ki, 6);
+  Serial.print("kd: ");
+  Serial.println(kd, 6);
+  Serial.print("maxSpeedCmd: ");
+  Serial.println(maxSpeedCmd);
+  Serial.println("------------------");
+}
+ 
+void enableMotor() {
+  setMotor(0, 0);
+  digitalWrite(enable1, HIGH);
+  motorEnabled = true;
+}
+ 
+void disableMotor() {
+  digitalWrite(enable1, LOW);
+  motorEnabled = false;
+}
+ 
+void setMotor(int dir, int vel) {
+  if (vel < 0) vel = 0;
+  if (vel > 255) vel = 255;
+ 
+  if (dir == 1) {
+    digitalWrite(direction1, LOW);
+  } else {
+    digitalWrite(direction1, HIGH);
+  }
+ 
+  dacWrite(DAC1, vel);
+}
+ 
 void setup_encoder() {
-  pinMode(CS_PIN, OUTPUT);     // Set chip select pin
-  SPI.begin();                 // Initialize SPI bus
-  digitalWrite(CS_PIN, HIGH);  // Default CS high (inactive)
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.begin();
 }
-
+ 
 void setup_motor_controller() {
-  pinMode(DAC1, OUTPUT); //Push a DAC Output to Motor Speed Controller
-  pinMode(enable1, OUTPUT); //Push an Enable Signal Output to Motor Controller
-  pinMode(direction1, OUTPUT); //Push a Direction Signal Output to Motor Controller
+  pinMode(DAC1, OUTPUT);
+  pinMode(enable1, OUTPUT);
+  pinMode(direction1, OUTPUT);
+ 
+  digitalWrite(direction1, LOW);
+  dacWrite(DAC1, 0);
   digitalWrite(enable1, LOW);
 }
-
+ 
 uint16_t readEncoderPosition14Bit(void) {
   uint16_t position = 0;
-
-  digitalWrite(CS_PIN, LOW);           // Begin SPI: CS Low
-  delayMicroseconds(3);                // Wait >= 3us per protocol
-
-  position = SPI.transfer(AMT22_NOP);  // First byte (High byte)
-  position = position << 8;
+ 
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+ 
+  digitalWrite(CS_PIN, LOW);
   delayMicroseconds(3);
-
-  position |= SPI.transfer(AMT22_NOP); // Second byte (Low byte)
-  digitalWrite(CS_PIN, HIGH);          // End SPI: CS High
-
-  // Mask for upper two checksum bits (position valid bits are 0-13)
+ 
+  position = SPI.transfer(AMT22_NOP);
+  position <<= 8;
+  delayMicroseconds(3);
+ 
+  position |= SPI.transfer(AMT22_NOP);
+ 
+  digitalWrite(CS_PIN, HIGH);
+  SPI.endTransaction();
+ 
   position &= 0x3FFF;
   return position;
 }
-
+ 
 float encoderReadingToDeg(uint16_t position) {
-  return 360 * ((float)position / (NUM_POSITIONS_PER_REV-1));
+  return 360.0f * ((float)position / (NUM_POSITIONS_PER_REV - 1));
 }
-
+ 
 float readEncoderPositionDeg(void) {
   return encoderReadingToDeg(readEncoderPosition14Bit());
 }
-
-/*
- * The AMT22 bus allows for extended commands. The first byte is 0x00 like a normal position transfer, but the
- * second byte is the command.
- * This function takes the pin number of the desired device as an input
- */
-void setZeroSPI(uint8_t cs_pin)
-{
-  //set CS to low
+ 
+void setZeroSPI(uint8_t cs_pin) {
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+ 
   digitalWrite(cs_pin, LOW);
   delayMicroseconds(3);
-
-  //send the first byte of the command
+ 
   SPI.transfer(AMT22_NOP);
   delayMicroseconds(3);
-
-  //send the second byte of the command
+ 
   SPI.transfer(AMT22_ZERO);
   delayMicroseconds(3);
-  
-  //set CS to high
+ 
   digitalWrite(cs_pin, HIGH);
-
-  delay(250); //250 millisecond delay to allow the encoder to reset
+  SPI.endTransaction();
+ 
+  delay(250);
 }
-
