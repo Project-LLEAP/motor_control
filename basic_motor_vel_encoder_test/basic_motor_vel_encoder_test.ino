@@ -16,6 +16,7 @@
  
 // Control settings
 #define MOTOR_MOVEMENT_TOLERANCE_DEG 0.5f
+#define DEADBAND_U 5.0f
 #define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
 #define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
  
@@ -153,12 +154,24 @@ void runController() {
     dir = 1;
   }
  
-  curVel = (int)fabsf(u);
- 
-  // make sure velocity is less than minSpeedCmd to prevent hitting motor deadband
-  if (curVel > 0 && curVel < minSpeedCmd) {
-  curVel = minSpeedCmd;
+  // NEW: better deadband handling
+  float abs_u = fabsf(u);
+  curVel = 0;
+
+  if (abs_u > DEADBAND_U) {
+    curVel = (int)(abs_u - DEADBAND_U);
+
+    if (fabsf(error) > 2.0f && curVel < minSpeedCmd) {
+      curVel = minSpeedCmd;
+    }
   }
+
+  // curVel = (int)fabsf(u);
+ 
+  // // make sure velocity is less than minSpeedCmd to prevent hitting motor deadband
+  // if (curVel > 0 && curVel < minSpeedCmd) {
+  // curVel = minSpeedCmd;
+  // }
  
  
   // cap velocity at max
@@ -374,11 +387,10 @@ uint16_t readEncoderPosition14Bit(void) {
   delayMicroseconds(3);
  
   position |= SPI.transfer(AMT22_NOP);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.endTransaction();
 
   if (verifyChecksumSPI(position)) {
-    digitalWrite(CS_PIN, HIGH);
-    SPI.endTransaction();
-  
     position &= 0x3FFF;
     return position;
   } 
@@ -403,8 +415,11 @@ float readEncoderPositionDeg() {
     return angle;
   }
 
-  float predictedAngle = prevAngle + curVel * (micros() - lastControlTimeUs); // TODO: verify this
-  return predictedAngle; 
+  return prevAngle; // just return this for now. TODO: check if we can calculate predictedAngle a different way, if needed
+  
+  // // this can blow up, curVel is DAC units and micros() is microseconds
+  // float predictedAngle = prevAngle + curVel * (micros() - lastControlTimeUs); // TODO: verify this
+  // return predictedAngle; 
 
 }
  
