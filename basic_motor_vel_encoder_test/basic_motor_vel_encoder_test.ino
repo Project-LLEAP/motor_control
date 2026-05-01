@@ -1,5 +1,7 @@
 /**
-input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1), vel [0-255]
+* input as follows: target angle [0, 360)(deg), direction (0 or 1), reset (0 or 1), vel [0-255]
+* HIGH is CCW for the motor
+* Positive is clockwise for the encoder according to Gemini, though couldn't find this in documentation 
 */
 
 #include <SPI.h>
@@ -106,6 +108,11 @@ void loop() {
   }
 }
 
+/*
+* targetAngle is the desired relative angle change
+* dir = 1 for CW, 0 for CCW
+* vel_8bit must be between [0-255]
+*/
 void moveToAngle(float targetAngle, int dir, int vel_8bit) {
   // turn the motor on
   digitalWrite(enable1, HIGH);
