@@ -1,6 +1,7 @@
 #include <SPI.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
  
 // Motor control pins
@@ -19,6 +20,7 @@
 #define DEADBAND_U 5.0f
 #define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
 #define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
+#define MAX_TARGET_SEQUENCE 32
  
 // State
 bool motorEnabled = false;
@@ -28,11 +30,16 @@ float target_pos = 0.0f;
 float prev_error = 0.0f;
 float integral_error = 0.0f;
 float derivative_error = 0.0f;
+
+// Target sequencing
+float targetSequence[MAX_TARGET_SEQUENCE];
+int targetSequenceCount = 0;
+int targetSequenceIndex = 0;
  
 // Tunable gains
-float kp = 5.0f;
-float ki = 0.0f;
-float kd = 0.0f;
+float kp = 50.0f;
+float ki = 5.0f;
+float kd = 2.0f;
  
 // Tunable max command
 int maxSpeedCmd = 255;
@@ -42,8 +49,9 @@ int minSpeedCmd = 30;
 float integral_limit = 50.0f;
  
 // Serial command buffer
-char cmdBuffer[64];
+char cmdBuffer[256];
 int cmdIndex = 0;
+bool cmdOverflow = false;
  
 // Timing
 uint32_t lastControlTimeUs = 0;
@@ -85,7 +93,7 @@ void setup() {
   Serial.println("Commands:");
   Serial.println("  E 1   -> enable motor");
   Serial.println("  E 0   -> disable motor");
-  Serial.println("  T 45  -> set target angle");
+  Serial.println("  T 45 90 15 -> set one or more target angles");
   Serial.println("  P 5   -> set kp");
   Serial.println("  I 0   -> set ki");
   Serial.println("  D 0   -> set kd");
@@ -130,6 +138,14 @@ void runController() {
     return;
   }
  
+  while (fabsf(error) < MOTOR_MOVEMENT_TOLERANCE_DEG && advanceTargetIfAvailable()) {
+    error = target_pos - current_pos;
+    integral_error = 0.0f;
+    derivative_error = 0.0f;
+    prev_error = error;
+    debug_error = error;
+  }
+
   if (fabsf(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
     setMotor(0, 0);
     integral_error = 0.0f;
@@ -195,23 +211,43 @@ void processSerial() {
  
     if (c == '\n') {
       cmdBuffer[cmdIndex] = '\0';
-      if (cmdIndex > 0) {
+      if (cmdOverflow) {
+        Serial.println("Bad command: line too long.");
+      } else if (cmdIndex > 0) {
         handleCommand(cmdBuffer);
       }
       cmdIndex = 0;
+      cmdOverflow = false;
     } else {
       if (cmdIndex < (int)sizeof(cmdBuffer) - 1) {
         cmdBuffer[cmdIndex++] = c;
+      } else {
+        cmdOverflow = true;
       }
     }
   }
 }
  
 void handleCommand(const char* cmd) {
+  while (*cmd == ' ' || *cmd == '\t') {
+    cmd++;
+  }
+
+  if (*cmd == '\0') {
+    return;
+  }
+
+  char key = cmd[0];
+  const char* args = cmd + 1;
+  while (*args == ' ' || *args == '\t') {
+    args++;
+  }
+
   // set to zero if z
-  if (strcmp(cmd, "Z") == 0 || strcmp(cmd, "z") == 0) {
+  if ((key == 'Z' || key == 'z') && *args == '\0') {
     disableMotor();
     setMotor(0, 0);
+    clearTargetSequence();
     delay(50);
     setZeroSPI(CS_PIN);
     delay(50);
@@ -224,12 +260,16 @@ void handleCommand(const char* cmd) {
   }
  
   // print status
-  if (strcmp(cmd, "S") == 0 || strcmp(cmd, "s") == 0) {
+  if ((key == 'S' || key == 's') && *args == '\0') {
     printStatus(readEncoderPositionDeg());
     return;
   }
+
+  if (key == 'T' || key == 't') {
+    handleTargetCommand(args);
+    return;
+  }
  
-  char key;
   float value;
   if (sscanf(cmd, "%c %f", &key, &value) != 2) {
     Serial.println("Bad command.");
@@ -259,15 +299,6 @@ void handleCommand(const char* cmd) {
       Serial.println(kd, 6);
       break;
  
-    case 'T':
-    case 't':
-      target_pos = value;
-      if (target_pos < 0.0f) target_pos = 0.0f;
-      if (target_pos >= 360.0f) target_pos = fmodf(target_pos, 360.0f);
-      Serial.print("target_pos = ");
-      Serial.println(target_pos, 3);
-      break;
- 
     case 'M':
     case 'm':
       maxSpeedCmd = (int)value;
@@ -281,6 +312,7 @@ void handleCommand(const char* cmd) {
     case 'e':
       if ((int)value == 1) {
         enableMotor();
+        clearTargetSequence();
         target_pos = readEncoderPositionDeg();
         integral_error = 0.0f;
         prev_error = 0.0f;
@@ -288,6 +320,7 @@ void handleCommand(const char* cmd) {
       } else {
         disableMotor();
         setMotor(0, 0);
+        clearTargetSequence();
         integral_error = 0.0f;
         prev_error = 0.0f;
         Serial.println("Motor DISABLED.");
@@ -298,6 +331,102 @@ void handleCommand(const char* cmd) {
       Serial.println("Unknown command.");
       break;
   }
+}
+
+void handleTargetCommand(const char* args) {
+  float parsedTargets[MAX_TARGET_SEQUENCE];
+  int parsedCount = 0;
+  int totalCount = 0;
+  bool truncated = false;
+
+  const char* p = args;
+  while (*p != '\0') {
+    while (*p == ' ' || *p == '\t') {
+      p++;
+    }
+
+    if (*p == '\0') {
+      break;
+    }
+
+    char* endPtr;
+    float value = strtof(p, &endPtr);
+    if (endPtr == p) {
+      Serial.println("Bad target list.");
+      return;
+    }
+
+    if (parsedCount < MAX_TARGET_SEQUENCE) {
+      parsedTargets[parsedCount++] = normalizeTargetAngle(value);
+    } else {
+      truncated = true;
+    }
+
+    totalCount++;
+    p = endPtr;
+  }
+
+  if (parsedCount == 0) {
+    Serial.println("Bad command. Use T angle [angle ...].");
+    return;
+  }
+
+  for (int i = 0; i < parsedCount; i++) {
+    targetSequence[i] = parsedTargets[i];
+  }
+
+  targetSequenceCount = parsedCount;
+  targetSequenceIndex = 0;
+  target_pos = targetSequence[0];
+
+  float current_pos = readEncoderPositionDeg();
+  integral_error = 0.0f;
+  derivative_error = 0.0f;
+  prev_error = target_pos - current_pos;
+
+  Serial.print("target sequence queued: ");
+  Serial.print(targetSequenceCount);
+  Serial.print(" angle");
+  if (targetSequenceCount != 1) Serial.print("s");
+  if (truncated) {
+    Serial.print(" (first ");
+    Serial.print(MAX_TARGET_SEQUENCE);
+    Serial.print(" of ");
+    Serial.print(totalCount);
+    Serial.print(" used)");
+  }
+  Serial.println();
+  Serial.print("target_pos = ");
+  Serial.println(target_pos, 3);
+}
+
+float normalizeTargetAngle(float angle) {
+  if (angle < 0.0f) return 0.0f;
+  if (angle >= 360.0f) return fmodf(angle, 360.0f);
+  return angle;
+}
+
+bool advanceTargetIfAvailable() {
+  if (targetSequenceIndex + 1 >= targetSequenceCount) {
+    return false;
+  }
+
+  targetSequenceIndex++;
+  target_pos = targetSequence[targetSequenceIndex];
+
+  Serial.print("target_pos = ");
+  Serial.print(target_pos, 3);
+  Serial.print(" (");
+  Serial.print(targetSequenceIndex + 1);
+  Serial.print("/");
+  Serial.print(targetSequenceCount);
+  Serial.println(")");
+  return true;
+}
+
+void clearTargetSequence() {
+  targetSequenceCount = 0;
+  targetSequenceIndex = 0;
 }
  
 void printDebug() {
@@ -312,7 +441,14 @@ void printDebug() {
   Serial.print(" vel=");
   Serial.print(debug_vel);
   Serial.print(" dir=");
-  Serial.println(debug_dir);
+  Serial.print(debug_dir);
+  if (targetSequenceCount > 1) {
+    Serial.print(" seq=");
+    Serial.print(targetSequenceIndex + 1);
+    Serial.print("/");
+    Serial.print(targetSequenceCount);
+  }
+  Serial.println();
 }
  
 void printStatus(float current_pos) {
@@ -323,6 +459,12 @@ void printStatus(float current_pos) {
   Serial.println(current_pos, 3);
   Serial.print("target_pos: ");
   Serial.println(target_pos, 3);
+  if (targetSequenceCount > 1) {
+    Serial.print("target_sequence: ");
+    Serial.print(targetSequenceIndex + 1);
+    Serial.print("/");
+    Serial.println(targetSequenceCount);
+  }
   Serial.print("kp: ");
   Serial.println(kp, 6);
   Serial.print("ki: ");
