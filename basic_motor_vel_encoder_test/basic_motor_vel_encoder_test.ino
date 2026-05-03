@@ -16,7 +16,6 @@
  
 // Control settings
 #define MOTOR_MOVEMENT_TOLERANCE_DEG 0.5f
-#define DEADBAND_U 5.0f
 #define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
 #define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
  
@@ -36,7 +35,7 @@ float kd = 0.0f;
  
 // Tunable max command
 int maxSpeedCmd = 255;
-int minSpeedCmd = 30;
+int minSpeedCmd = 25;
  
 // Anti-windup clamp
 float integral_limit = 50.0f;
@@ -55,10 +54,7 @@ float debug_error = 0.0f;
 float debug_u = 0.0f;
 int debug_vel = 0;
 int debug_dir = 0;
-
-// current velocity
-volatile int curVel = 0;
-
+ 
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -73,7 +69,6 @@ void setup() {
  
   // Leave disabled on boot
   // setZeroSPI(CS_PIN);   // only run manually if needed
-
  
   target_pos = readEncoderPositionDeg();
  
@@ -154,36 +149,25 @@ void runController() {
     dir = 1;
   }
  
-  // NEW: better deadband handling
   float abs_u = fabsf(u);
-  curVel = 0;
+  int vel = 0;
 
   if (abs_u > DEADBAND_U) {
-    curVel = (int)(abs_u - DEADBAND_U);
+    vel = (int)abs_u;
 
-    if (fabsf(error) > 2.0f && curVel < minSpeedCmd) {
-      curVel = minSpeedCmd;
+    if (vel > 0 && vel < minSpeedCmd) {
+      vel = minSpeedCmd;
     }
   }
-
-  // curVel = (int)fabsf(u);
  
-  // // make sure velocity is less than minSpeedCmd to prevent hitting motor deadband
-  // if (curVel > 0 && curVel < minSpeedCmd) {
-  // curVel = minSpeedCmd;
-  // }
+  if (vel > maxSpeedCmd) {
+    vel = maxSpeedCmd;
+  }
  
- 
-  // cap velocity at max
-  if (curVel > maxSpeedCmd) {
-    curVel = maxSpeedCmd;
-  } 
- 
-  // spin the motor
-  setMotor(dir, curVel);
+  setMotor(dir, vel);
  
   debug_u = u;
-  debug_vel = curVel;
+  debug_vel = vel;
   debug_dir = dir;
 }
  
@@ -208,7 +192,6 @@ void processSerial() {
 }
  
 void handleCommand(const char* cmd) {
-  // set to zero if z
   if (strcmp(cmd, "Z") == 0 || strcmp(cmd, "z") == 0) {
     disableMotor();
     setMotor(0, 0);
@@ -223,7 +206,6 @@ void handleCommand(const char* cmd) {
     return;
   }
  
-  // print status
   if (strcmp(cmd, "S") == 0 || strcmp(cmd, "s") == 0) {
     printStatus(readEncoderPositionDeg());
     return;
@@ -387,40 +369,20 @@ uint16_t readEncoderPosition14Bit(void) {
   delayMicroseconds(3);
  
   position |= SPI.transfer(AMT22_NOP);
+ 
   digitalWrite(CS_PIN, HIGH);
   SPI.endTransaction();
-
-  if (verifyChecksumSPI(position)) {
-    position &= 0x3FFF;
-    return position;
-  } 
-  else {
-    return -1; // sentinel showing failure
-  }
  
+  position &= 0x3FFF;
+  return position;
 }
  
 float encoderReadingToDeg(uint16_t position) {
   return 360.0f * ((float)position / (NUM_POSITIONS_PER_REV - 1));
 }
  
-float readEncoderPositionDeg() {
-  static float prevAngle = -1;
-  uint16_t position = readEncoderPosition14Bit();
-  uint16_t negative_one = -1;
-
-  if (position != negative_one) {
-    float angle = encoderReadingToDeg(position);
-    prevAngle = angle;
-    return angle;
-  }
-
-  return prevAngle; // just return this for now. TODO: check if we can calculate predictedAngle a different way, if needed
-  
-  // // this can blow up, curVel is DAC units and micros() is microseconds
-  // float predictedAngle = prevAngle + curVel * (micros() - lastControlTimeUs); // TODO: verify this
-  // return predictedAngle; 
-
+float readEncoderPositionDeg(void) {
+  return encoderReadingToDeg(readEncoderPosition14Bit());
 }
  
 void setZeroSPI(uint8_t cs_pin) {
@@ -441,16 +403,45 @@ void setZeroSPI(uint8_t cs_pin) {
   delay(250);
 }
 
-/*
- * calculate the checksums and then make sure they match what the encoder sent.
- */
-bool verifyChecksumSPI(uint16_t message)
-{
-  //checksum is invert of XOR of bits, so start with 0b11, so things end up inverted
-  uint16_t checksum = 0x3;
-  for(int i = 0; i < 14; i += 2)
-  {
-    checksum ^= (message >> i) & 0x3;
-  }
-  return checksum == (message >> 14);
-}
+// checksum code did not work. above is the working code with deadband, and below is the checksum implementation commented out
+
+// uint16_t readEncoderPosition14Bit(void) {
+//   uint16_t position = 0;
+ 
+//   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+ 
+//   digitalWrite(CS_PIN, LOW);
+//   delayMicroseconds(3);
+ 
+//   position = SPI.transfer(AMT22_NOP);
+//   position <<= 8;
+//   delayMicroseconds(3);
+ 
+//   position |= SPI.transfer(AMT22_NOP);
+//   digitalWrite(CS_PIN, HIGH);
+//   SPI.endTransaction();
+
+//   if (verifyChecksumSPI(position)) {
+//     position &= 0x3FFF;
+//     return position;
+//   } 
+//   else {
+//     return -1; // sentinel showing failure
+//   }
+ 
+// }
+
+// /*
+//  * calculate the checksums and then make sure they match what the encoder sent.
+//  */
+// bool verifyChecksumSPI(uint16_t message)
+// {
+//   //checksum is invert of XOR of bits, so start with 0b11, so things end up inverted
+//   uint16_t checksum = 0x3;
+//   for(int i = 0; i < 14; i += 2)
+//   {
+//     checksum ^= (message >> i) & 0x3;
+//   }
+//   return checksum == (message >> 14);
+// }
+
