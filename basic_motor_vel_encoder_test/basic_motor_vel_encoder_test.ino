@@ -2,7 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-
+ 
 // Motor control pins
 #define DAC1 25
 #define enable1 33
@@ -15,17 +15,19 @@
 #define NUM_POSITIONS_PER_REV 16384
  
 // Control settings
-#define MOTOR_MOVEMENT_TOLERANCE_DEG 0.5f
-#define DEADBAND_U 1.0f
-#define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
+#define TOLERANCE_STOP 1.5f          // stop when within this
+#define TOLERANCE_START 3.0f         // don't restart until outside this
+#define CONTROL_PERIOD_US 1000UL     // 1 ms = 1000 Hz
 #define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
+#define DEADBAND_U 2.0f
+#define MAX_QUEUE_SIZE 32
  
 // State
 bool motorEnabled = false;
  
 // Control state
 float target_pos = 0.0f;
-float prev_error = 0.0f;
+float prev_pos = 0.0f;
 float integral_error = 0.0f;
 float derivative_error = 0.0f;
  
@@ -39,7 +41,7 @@ int maxSpeedCmd = 255;
 int minSpeedCmd = 25;
  
 // Anti-windup clamp
-float integral_limit = 50.0f;
+float integral_limit = 100.0f;
  
 // Serial command buffer
 char cmdBuffer[64];
@@ -56,51 +58,13 @@ float debug_u = 0.0f;
 int debug_vel = 0;
 int debug_dir = 0;
  
-/*
-want the controller to advance to the next waypoint once it is close enough, while keeping the motor enabled and the PID loop running continuously
-waypoint array: array of points to move to
-*/
-
-#define MAX_WAYPOINTS 20
-
-struct Waypoint {
-  float targetDeg;
-  float kp;
-  float ki;
-  float kd;
-};
-
-Waypoint waypoints[MAX_WAYPOINTS];
-int numWaypoints = 0;
-int currentWaypoint = 0;
-bool sequenceActive = false;
-
-void loadCurrentWaypoint() {
-  if (currentWaypoint < 0 || currentWaypoint >= numWaypoints) {
-    sequenceActive = false;
-    return;
-  }
-
-  target_pos = waypoints[currentWaypoint].targetDeg;
-  kp = waypoints[currentWaypoint].kp;
-  ki = waypoints[currentWaypoint].ki;
-  kd = waypoints[currentWaypoint].kd;
-
-  integral_error = 0.0f;
-  prev_error = 0.0f;
-
-  Serial.print("Moving to waypoint ");
-  Serial.print(currentWaypoint);
-  Serial.print(": target=");
-  Serial.print(target_pos, 3);
-  Serial.print(" kp=");
-  Serial.print(kp, 6);
-  Serial.print(" ki=");
-  Serial.print(ki, 6);
-  Serial.print(" kd=");
-  Serial.println(kd, 6);
-}
-
+float curVel = 0;
+ 
+float posQueue[MAX_QUEUE_SIZE];
+int queueLength = 0;
+int queueIndex = 0;
+bool queueRunning = false;
+ 
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -117,6 +81,7 @@ void setup() {
   // setZeroSPI(CS_PIN);   // only run manually if needed
  
   target_pos = readEncoderPositionDeg();
+  prev_pos = target_pos;
  
   lastControlTimeUs = micros();
   lastDebugTimeMs = millis();
@@ -124,15 +89,17 @@ void setup() {
   Serial.println("Controller ready.");
   Serial.println("Motor is DISABLED.");
   Serial.println("Commands:");
-  Serial.println("  E 1   -> enable motor");
-  Serial.println("  E 0   -> disable motor");
-  Serial.println("  T 45  -> set target angle");
-  Serial.println("  P 5   -> set kp");
-  Serial.println("  I 0   -> set ki");
-  Serial.println("  D 0   -> set kd");
-  Serial.println("  M 255 -> set max speed command");
-  Serial.println("  Z     -> zero encoder");
-  Serial.println("  S     -> print status");
+  Serial.println("  E 1       -> enable motor");
+  Serial.println("  E 0       -> disable motor");
+  Serial.println("  T 45      -> set target angle");
+  Serial.println("  T 0 45 90 -> queue multiple angles");
+  Serial.println("  X         -> clear queue");
+  Serial.println("  P 5       -> set kp");
+  Serial.println("  I 0       -> set ki");
+  Serial.println("  D 0       -> set kd");
+  Serial.println("  M 255     -> set max speed command");
+  Serial.println("  Z         -> zero encoder");
+  Serial.println("  S         -> print status");
   printStatus(readEncoderPositionDeg());
 }
  
@@ -141,7 +108,7 @@ void loop() {
  
   uint32_t nowUs = micros();
   if ((uint32_t)(nowUs - lastControlTimeUs) >= CONTROL_PERIOD_US) {
-    lastControlTimeUs += CONTROL_PERIOD_US;  // fixed-rate scheduling
+    lastControlTimeUs += CONTROL_PERIOD_US;
     runController();
   }
  
@@ -151,24 +118,18 @@ void loop() {
     printDebug();
   }
 }
-
-float angleErrorDeg(float target, float current){
-  float error = target-current;
-
-  while(error >180.0f) error -= 360.0f;
-  while(error <-180.0f) error += 360.0f;
-  return error;
-
-}
-
-
+ 
 void runController() {
   float deltaT = CONTROL_PERIOD_US / 1.0e6f;
  
   float current_pos = readEncoderPositionDeg();
-  //TODO--> by jason :)
-  //float error = target_pos - current_pos;
-  float error= angleErrorDeg(target_pos, current_pos);
+  float error = target_pos - current_pos;
+ 
+  if (fabs(error) >= 180 && error < 0) {
+    error += 360;
+  } else if (fabs(error) >= 180 && error > 0) {
+    error -= 360;
+  }
  
   debug_current_pos = current_pos;
   debug_error = error;
@@ -176,49 +137,52 @@ void runController() {
   if (!motorEnabled) {
     setMotor(0, 0);
     integral_error = 0.0f;
-    prev_error = error;
+    prev_pos = current_pos;
     debug_u = 0.0f;
     debug_vel = 0;
     debug_dir = 0;
     return;
   }
  
-  if (fabsf(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
-  integral_error = 0.0f;
-  prev_error = error;
-
-  if (sequenceActive) {
-    currentWaypoint++;
-
-    if (currentWaypoint < numWaypoints) {
-      loadCurrentWaypoint();
-      return;
-    } else {
-      sequenceActive = false;
-      setMotor(0, 0);
-      debug_u = 0.0f;
-      debug_vel = 0;
-      debug_dir = 0;
-      Serial.println("Waypoint sequence complete.");
-      return;
-    }
+  // Hysteresis deadband to prevent jitter at target
+  static bool inDeadband = false;
+  if (fabsf(error) < TOLERANCE_STOP) {
+    inDeadband = true;
+  } else if (fabsf(error) > TOLERANCE_START) {
+    inDeadband = false;
   }
-
-  setMotor(0, 0);
-  debug_u = 0.0f;
-  debug_vel = 0;
-  debug_dir = 0;
-  return;
-}
+ 
+  if (inDeadband) {
+    setMotor(0, 0);
+    integral_error = 0.0f;
+    prev_pos = current_pos;
+    debug_u = 0.0f;
+    debug_vel = 0;
+    debug_dir = 0;
+ 
+    if (queueRunning && queueIndex < queueLength) {
+      target_pos = posQueue[queueIndex++];
+      inDeadband = false;
+      integral_error = 0.0f;
+      Serial.print("Queue -> ");
+      Serial.println(target_pos, 2);
+    } else if (queueRunning && queueIndex >= queueLength) {
+      queueRunning = false;
+      Serial.println("Queue complete.");
+    }
+    return;
+  }
  
   integral_error += error * deltaT;
  
   if (integral_error > integral_limit) integral_error = integral_limit;
   if (integral_error < -integral_limit) integral_error = -integral_limit;
  
-  derivative_error = (error - prev_error) / deltaT;
+  // Derivative on measurement to avoid derivative kick on setpoint change
+  derivative_error = -(current_pos - prev_pos) / deltaT;
+  prev_pos = current_pos;
+ 
   float u = (kp * error) + (ki * integral_error) + (kd * derivative_error);
-  prev_error = error;
  
   int dir = 0;
   if (u < 0.0f) {
@@ -226,24 +190,24 @@ void runController() {
   }
  
   float abs_u = fabsf(u);
-  int vel = 0;
-
+  curVel = 0;
+ 
   if (abs_u > DEADBAND_U) {
-    vel = (int)abs_u;
-
-    if (vel > 0 && vel < minSpeedCmd) {
-      vel = minSpeedCmd;
+    curVel = constrain((int)abs_u, 0, maxSpeedCmd);
+ 
+    if (curVel > 0 && curVel < minSpeedCmd) {
+      if (fabsf(error) > 5.0f) {
+        curVel = minSpeedCmd;
+      } else {
+        curVel = 0;
+      }
     }
   }
  
-  if (vel > maxSpeedCmd) {
-    vel = maxSpeedCmd;
-  }
- 
-  setMotor(dir, vel);
+  setMotor(dir, curVel);
  
   debug_u = u;
-  debug_vel = vel;
+  debug_vel = curVel;
   debug_dir = dir;
 }
  
@@ -275,8 +239,8 @@ void handleCommand(const char* cmd) {
     setZeroSPI(CS_PIN);
     delay(50);
     target_pos = readEncoderPositionDeg();
+    prev_pos = target_pos;
     integral_error = 0.0f;
-    prev_error = 0.0f;
     Serial.println("Encoder zeroed. Motor disabled. Target set to current position.");
     printStatus(readEncoderPositionDeg());
     return;
@@ -284,6 +248,46 @@ void handleCommand(const char* cmd) {
  
   if (strcmp(cmd, "S") == 0 || strcmp(cmd, "s") == 0) {
     printStatus(readEncoderPositionDeg());
+    return;
+  }
+ 
+  if (strcmp(cmd, "X") == 0 || strcmp(cmd, "x") == 0) {
+    queueRunning = false;
+    queueLength = 0;
+    queueIndex = 0;
+    Serial.println("Queue cleared.");
+    return;
+  }
+ 
+  // T command handled before sscanf so multiple angles are parsed correctly
+  if (cmd[0] == 'T' || cmd[0] == 't') {
+    queueLength = 0;
+    queueIndex = 0;
+    queueRunning = false;
+    const char* ptr = cmd + 2;
+    while (*ptr != '\0' && queueLength < MAX_QUEUE_SIZE) {
+      while (*ptr == ' ') ptr++;
+      if (*ptr == '\0') break;
+      float val = atof(ptr);
+      posQueue[queueLength++] = constrain(val, 0.0f, 359.9f);
+      while (*ptr != ' ' && *ptr != '\0') ptr++;
+    }
+    if (queueLength == 1) {
+      target_pos = posQueue[0];
+      queueLength = 0;
+      integral_error = 0.0f;
+      Serial.print("target_pos = ");
+      Serial.println(target_pos, 3);
+    } else {
+      queueIndex = 0;
+      queueRunning = true;
+      target_pos = posQueue[queueIndex++];
+      integral_error = 0.0f;
+      prev_pos = readEncoderPositionDeg();
+      Serial.print("Queue loaded: ");
+      Serial.print(queueLength);
+      Serial.println(" points.");
+    }
     return;
   }
  
@@ -317,15 +321,6 @@ void handleCommand(const char* cmd) {
       Serial.println(kd, 6);
       break;
  
-    case 'T':
-    case 't':
-      target_pos = value;
-      if (target_pos < 0.0f) target_pos = 0.0f;
-      if (target_pos >= 360.0f) target_pos = fmodf(target_pos, 360.0f);
-      Serial.print("target_pos = ");
-      Serial.println(target_pos, 3);
-      break;
- 
     case 'M':
     case 'm':
       maxSpeedCmd = (int)value;
@@ -340,14 +335,13 @@ void handleCommand(const char* cmd) {
       if ((int)value == 1) {
         enableMotor();
         target_pos = readEncoderPositionDeg();
+        prev_pos = target_pos;
         integral_error = 0.0f;
-        prev_error = 0.0f;
         Serial.println("Motor ENABLED. Target reset to current position.");
       } else {
         disableMotor();
         setMotor(0, 0);
         integral_error = 0.0f;
-        prev_error = 0.0f;
         Serial.println("Motor DISABLED.");
       }
       break;
@@ -371,6 +365,11 @@ void printDebug() {
   Serial.print(debug_vel);
   Serial.print(" dir=");
   Serial.println(debug_dir);
+ 
+  Serial.print("vel:");
+  Serial.print(debug_vel);
+  Serial.print(" err:");
+  Serial.println(debug_error);
 }
  
 void printStatus(float current_pos) {
@@ -408,9 +407,9 @@ void setMotor(int dir, int vel) {
   if (vel > 255) vel = 255;
  
   if (dir == 1) {
-    digitalWrite(direction1, LOW);
-  } else {
     digitalWrite(direction1, HIGH);
+  } else {
+    digitalWrite(direction1, LOW);
   }
  
   dacWrite(DAC1, vel);
@@ -478,46 +477,3 @@ void setZeroSPI(uint8_t cs_pin) {
  
   delay(250);
 }
-
-// checksum code did not work. above is the working code with deadband, and below is the checksum implementation commented out
-
-// uint16_t readEncoderPosition14Bit(void) {
-//   uint16_t position = 0;
- 
-//   SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
- 
-//   digitalWrite(CS_PIN, LOW);
-//   delayMicroseconds(3);
- 
-//   position = SPI.transfer(AMT22_NOP);
-//   position <<= 8;
-//   delayMicroseconds(3);
- 
-//   position |= SPI.transfer(AMT22_NOP);
-//   digitalWrite(CS_PIN, HIGH);
-//   SPI.endTransaction();
-
-//   if (verifyChecksumSPI(position)) {
-//     position &= 0x3FFF;
-//     return position;
-//   } 
-//   else {
-//     return -1; // sentinel showing failure
-//   }
- 
-// }
-
-// /*
-//  * calculate the checksums and then make sure they match what the encoder sent.
-//  */
-// bool verifyChecksumSPI(uint16_t message)
-// {
-//   //checksum is invert of XOR of bits, so start with 0b11, so things end up inverted
-//   uint16_t checksum = 0x3;
-//   for(int i = 0; i < 14; i += 2)
-//   {
-//     checksum ^= (message >> i) & 0x3;
-//   }
-//   return checksum == (message >> 14);
-// }
-
