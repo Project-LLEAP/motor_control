@@ -2,7 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
- 
+
 // Motor control pins
 #define DAC1 25
 #define enable1 33
@@ -16,6 +16,7 @@
  
 // Control settings
 #define MOTOR_MOVEMENT_TOLERANCE_DEG 0.5f
+#define DEADBAND_U 1.0f
 #define CONTROL_PERIOD_US 2000UL     // 2 ms = 500 Hz
 #define DEBUG_PERIOD_MS 100UL        // print at 10 Hz
  
@@ -55,6 +56,51 @@ float debug_u = 0.0f;
 int debug_vel = 0;
 int debug_dir = 0;
  
+/*
+want the controller to advance to the next waypoint once it is close enough, while keeping the motor enabled and the PID loop running continuously
+waypoint array: array of points to move to
+*/
+
+#define MAX_WAYPOINTS 20
+
+struct Waypoint {
+  float targetDeg;
+  float kp;
+  float ki;
+  float kd;
+};
+
+Waypoint waypoints[MAX_WAYPOINTS];
+int numWaypoints = 0;
+int currentWaypoint = 0;
+bool sequenceActive = false;
+
+void loadCurrentWaypoint() {
+  if (currentWaypoint < 0 || currentWaypoint >= numWaypoints) {
+    sequenceActive = false;
+    return;
+  }
+
+  target_pos = waypoints[currentWaypoint].targetDeg;
+  kp = waypoints[currentWaypoint].kp;
+  ki = waypoints[currentWaypoint].ki;
+  kd = waypoints[currentWaypoint].kd;
+
+  integral_error = 0.0f;
+  prev_error = 0.0f;
+
+  Serial.print("Moving to waypoint ");
+  Serial.print(currentWaypoint);
+  Serial.print(": target=");
+  Serial.print(target_pos, 3);
+  Serial.print(" kp=");
+  Serial.print(kp, 6);
+  Serial.print(" ki=");
+  Serial.print(ki, 6);
+  Serial.print(" kd=");
+  Serial.println(kd, 6);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -105,12 +151,24 @@ void loop() {
     printDebug();
   }
 }
- 
+
+float angleErrorDeg(float target, float current){
+  float error = target-current;
+
+  while(error >180.0f) error -= 360.0f;
+  while(error <-180.0f) error += 360.0f;
+  return error;
+
+}
+
+
 void runController() {
   float deltaT = CONTROL_PERIOD_US / 1.0e6f;
  
   float current_pos = readEncoderPositionDeg();
-  float error = target_pos - current_pos;
+  //TODO--> by jason :)
+  //float error = target_pos - current_pos;
+  float error= angleErrorDeg(target_pos, current_pos);
  
   debug_current_pos = current_pos;
   debug_error = error;
@@ -126,14 +184,32 @@ void runController() {
   }
  
   if (fabsf(error) < MOTOR_MOVEMENT_TOLERANCE_DEG) {
-    setMotor(0, 0);
-    integral_error = 0.0f;
-    prev_error = error;
-    debug_u = 0.0f;
-    debug_vel = 0;
-    debug_dir = 0;
-    return;
+  integral_error = 0.0f;
+  prev_error = error;
+
+  if (sequenceActive) {
+    currentWaypoint++;
+
+    if (currentWaypoint < numWaypoints) {
+      loadCurrentWaypoint();
+      return;
+    } else {
+      sequenceActive = false;
+      setMotor(0, 0);
+      debug_u = 0.0f;
+      debug_vel = 0;
+      debug_dir = 0;
+      Serial.println("Waypoint sequence complete.");
+      return;
+    }
   }
+
+  setMotor(0, 0);
+  debug_u = 0.0f;
+  debug_vel = 0;
+  debug_dir = 0;
+  return;
+}
  
   integral_error += error * deltaT;
  
