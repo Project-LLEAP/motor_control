@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
  
 // Motor control pins
 #define DAC1 25
@@ -264,18 +265,60 @@ void handleCommand(const char* cmd) {
     queueLength = 0;
     queueIndex = 0;
     queueRunning = false;
-    const char* ptr = cmd + 2;
+
+    const char* ptr = cmd + 1;
+
     while (*ptr != '\0' && queueLength < MAX_QUEUE_SIZE) {
-      while (*ptr == ' ') ptr++;
+      while (isspace((unsigned char)*ptr)) ptr++;
       if (*ptr == '\0') break;
-      float val = atof(ptr);
-      posQueue[queueLength++] = constrain(val, 0.0f, 359.9f);
-      while (*ptr != ' ' && *ptr != '\0') ptr++;
+
+      char* endptr;
+      float val = strtof(ptr, &endptr);
+
+      // If strtof could not parse a number, skip this bad token
+      if (endptr == ptr) {
+        Serial.print("Skipping invalid T value near: ");
+        Serial.println(ptr);
+        while (*ptr != '\0' && !isspace((unsigned char)*ptr)) {
+          ptr++;
+        }
+        continue;
+      }
+
+      if (*endptr != '\0' && !isspace((unsigned char)*endptr)) {
+        Serial.print("Skipping invalid T token near: ");
+        Serial.println(ptr);
+        while (*ptr != '\0' && !isspace((unsigned char)*ptr)) {
+          ptr++;
+        }
+        continue;
+      }
+
+      // Skip NaN, infinity, or values outside your allowed degree range
+      if (!isfinite(val) || val < 0.0f || val > 359.9f) {
+        Serial.print("Skipping out-of-range T value: ");
+        Serial.println(val, 3);
+
+        ptr = endptr;
+        continue;
+      }
+
+      // Only valid values get added to the queue
+      posQueue[queueLength++] = val;
+      ptr = endptr;
     }
+
+    if (queueLength == 0) {
+      Serial.println("No valid T values provided.");
+      return;
+    }
+
     if (queueLength == 1) {
       target_pos = posQueue[0];
       queueLength = 0;
       integral_error = 0.0f;
+      prev_pos = readEncoderPositionDeg();
+
       Serial.print("target_pos = ");
       Serial.println(target_pos, 3);
     } else {
@@ -284,10 +327,12 @@ void handleCommand(const char* cmd) {
       target_pos = posQueue[queueIndex++];
       integral_error = 0.0f;
       prev_pos = readEncoderPositionDeg();
+
       Serial.print("Queue loaded: ");
       Serial.print(queueLength);
-      Serial.println(" points.");
+      Serial.println(" valid points.");
     }
+
     return;
   }
  
